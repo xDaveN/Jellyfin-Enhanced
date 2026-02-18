@@ -79,25 +79,110 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             _dbContextFactory = dbContextFactory;
         }
 
-        private async Task<JellyseerrUser?> GetJellyseerrUser(string jellyfinUserId)
+        private sealed class JellyseerrInstanceTarget
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Name { get; init; } = string.Empty;
+            public string Url { get; init; } = string.Empty;
+            public string ApiKey { get; init; } = string.Empty;
+        }
+
+        private static string[] SplitConfigLines(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return Array.Empty<string>();
+            }
+
+            return value
+                .Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(v => v.Trim())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .ToArray();
+        }
+
+        private List<JellyseerrInstanceTarget> GetConfiguredJellyseerrInstances(PluginConfiguration? config)
+        {
+            var instances = new List<JellyseerrInstanceTarget>();
+            if (config == null)
+            {
+                return instances;
+            }
+
+            var urls = SplitConfigLines(config.JellyseerrUrls);
+            if (urls.Length == 0)
+            {
+                return instances;
+            }
+
+            var apiKeys = !string.IsNullOrWhiteSpace(config.JellyseerrApiKeys)
+                ? SplitConfigLines(config.JellyseerrApiKeys)
+                : SplitConfigLines(config.JellyseerrApiKey);
+            var names = SplitConfigLines(config.JellyseerrInstanceNames);
+            var useSharedApiKey = apiKeys.Length == 1;
+
+            for (var i = 0; i < urls.Length; i++)
+            {
+                var apiKey = useSharedApiKey ? apiKeys.FirstOrDefault() : (i < apiKeys.Length ? apiKeys[i] : string.Empty);
+                if (string.IsNullOrWhiteSpace(apiKey))
+                {
+                    continue;
+                }
+
+                var name = i < names.Length && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : $"Seerr {i + 1}";
+                instances.Add(new JellyseerrInstanceTarget
+                {
+                    Id = $"seerr-{i + 1}",
+                    Name = name,
+                    Url = urls[i].Trim().TrimEnd('/'),
+                    ApiKey = apiKey.Trim()
+                });
+            }
+
+            return instances;
+        }
+
+        private string? GetRequestedJellyseerrInstanceId()
+        {
+            if (!Request.Query.TryGetValue("instanceId", out var values))
+            {
+                return null;
+            }
+
+            return values.FirstOrDefault();
+        }
+
+        private async Task<JellyseerrUser?> GetJellyseerrUser(string jellyfinUserId, string? instanceId = null)
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            var configuredInstances = GetConfiguredJellyseerrInstances(config);
+            if (config == null || configuredInstances.Count == 0)
             {
                 _logger.Warning("Jellyseerr configuration is missing. Cannot look up user ID.");
                 return null;
             }
 
-            // _logger.Info($"Attempting to find Jellyseerr user for Jellyfin User ID: {jellyfinUserId}");
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
+            IEnumerable<JellyseerrInstanceTarget> instancesToCheck = configuredInstances;
+            if (!string.IsNullOrWhiteSpace(instanceId))
+            {
+                var requested = configuredInstances.FirstOrDefault(i => string.Equals(i.Id, instanceId, StringComparison.OrdinalIgnoreCase));
+                if (requested == null)
+                {
+                    _logger.Warning($"Requested Seerr instance '{instanceId}' was not found.");
+                    return null;
+                }
 
-            foreach (var url in urls)
+                instancesToCheck = new[] { requested };
+            }
+
+            foreach (var instance in instancesToCheck)
             {
                 try
                 {
-                    var requestUri = $"{url.Trim().TrimEnd('/')}/api/v1/user?take=1000"; // Fetch all users to find a match
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+
+                    var requestUri = $"{instance.Url}/api/v1/user?take=1000"; // Fetch all users to find a match
                     // _logger.Info($"Requesting users from Jellyseerr URL: {requestUri}");
                     var response = await httpClient.GetAsync(requestUri);
 
@@ -113,47 +198,63 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                             var user = users?.FirstOrDefault(u => string.Equals(u.JellyfinUserId, normalizedJellyfinUserId, StringComparison.OrdinalIgnoreCase));
                             if (user != null)
                             {
-                                // _logger.Info($"Found Jellyseerr user ID {user.Id} for Jellyfin user ID {jellyfinUserId} at {url.Trim()}");
+                                // _logger.Info($"Found Jellyseerr user ID {user.Id} for Jellyfin user ID {jellyfinUserId} at {instance.Url}");
                                 return user;
                             }
                             else
                             {
-                                _logger.Info($"No matching Jellyfin User ID found in the {users?.Count ?? 0} users from {url.Trim()}");
+                                _logger.Info($"No matching Jellyfin User ID found in the {users?.Count ?? 0} users from {instance.Url}");
                             }
                         }
                     }
                     else
                     {
                         var errorContent = await response.Content.ReadAsStringAsync();
-                        _logger.Warning($"Failed to fetch users from Jellyseerr at {url}. Status: {response.StatusCode}. Response: {errorContent}");
+                        _logger.Warning($"Failed to fetch users from Jellyseerr at {instance.Url}. Status: {response.StatusCode}. Response: {errorContent}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error($"Exception while trying to get Jellyseerr user ID from {url}: {ex.Message}");
+                    _logger.Error($"Exception while trying to get Jellyseerr user ID from {instance.Url}: {ex.Message}");
                 }
             }
 
-            _logger.Warning($"Could not find a matching Jellyseerr user for Jellyfin User ID {jellyfinUserId} after checking all URLs.");
+            _logger.Warning($"Could not find a matching Jellyseerr user for Jellyfin User ID {jellyfinUserId} after checking all configured Seerr instances.");
             return null;
         }
 
-        private async Task<string?> GetJellyseerrUserId(string jellyfinUserId)
-            => (await GetJellyseerrUser(jellyfinUserId))?.Id.ToString();
+        private async Task<string?> GetJellyseerrUserId(string jellyfinUserId, string? instanceId = null)
+            => (await GetJellyseerrUser(jellyfinUserId, instanceId))?.Id.ToString();
 
         [Authorize]
         private async Task<IActionResult> ProxyJellyseerrRequest(string apiPath, HttpMethod method, string? content = null)
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || !config.JellyseerrEnabled || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            if (config == null || !config.JellyseerrEnabled)
             {
                 _logger.Warning("Jellyseerr integration is not configured or enabled.");
                 return StatusCode(503, "Jellyseerr integration is not configured or enabled.");
             }
 
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
+            var configuredInstances = GetConfiguredJellyseerrInstances(config);
+            if (configuredInstances.Count == 0)
+            {
+                _logger.Warning("Jellyseerr integration is missing valid URL/API key configuration.");
+                return StatusCode(503, "Jellyseerr integration is not configured or enabled.");
+            }
+
+            var requestedInstanceId = GetRequestedJellyseerrInstanceId();
+            IEnumerable<JellyseerrInstanceTarget> instancesToTry = configuredInstances;
+            if (!string.IsNullOrWhiteSpace(requestedInstanceId))
+            {
+                var requestedInstance = configuredInstances.FirstOrDefault(i => string.Equals(i.Id, requestedInstanceId, StringComparison.OrdinalIgnoreCase));
+                if (requestedInstance == null)
+                {
+                    return BadRequest(new { message = $"Seerr instance '{requestedInstanceId}' was not found." });
+                }
+
+                instancesToTry = new[] { requestedInstance };
+            }
 
             string? jellyfinUserId = null;
             if (Request.Headers.TryGetValue("X-Jellyfin-User-Id", out var jellyfinUserIdValues))
@@ -164,15 +265,6 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                     _logger.Warning("Could not find Jellyfin User ID in request headers.");
                     return BadRequest(new { message = "Jellyfin User ID was not provided in the request." });
                 }
-                var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId);
-
-                if (string.IsNullOrEmpty(jellyseerrUserId))
-                {
-                    _logger.Warning($"Could not find a Jellyseerr user for Jellyfin user {jellyfinUserId}. Aborting request.");
-                    return NotFound(new { message = "Current Jellyfin user is not linked to a Jellyseerr user." });
-                }
-
-                httpClient.DefaultRequestHeaders.Add("X-Api-User", jellyseerrUserId);
             }
             else
             {
@@ -183,17 +275,29 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             int lastStatusCode = 500;
             string lastErrorContent = "Could not connect to any configured Jellyseerr instance.";
 
-            foreach (var url in urls)
+            foreach (var instance in instancesToTry)
             {
-                var trimmedUrl = url.Trim();
                 try
                 {
-                    var requestUri = $"{trimmedUrl.TrimEnd('/')}{apiPath}";
+                    var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId!, instance.Id);
+                    if (string.IsNullOrEmpty(jellyseerrUserId))
+                    {
+                        _logger.Warning($"Could not find a Seerr user for Jellyfin user {jellyfinUserId} on instance '{instance.Name}'.");
+                        lastStatusCode = 404;
+                        lastErrorContent = System.Text.Json.JsonSerializer.Serialize(new { message = $"Current Jellyfin user is not linked to a Seerr user on instance '{instance.Name}'." });
+                        continue;
+                    }
+
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                    httpClient.DefaultRequestHeaders.Add("X-Api-User", jellyseerrUserId);
+
+                    var requestUri = $"{instance.Url}{apiPath}";
                     // Skip logging for similar/recommendations endpoints
                     bool isSimilarOrRecommendations = apiPath.Contains("/similar") || apiPath.Contains("/recommendations");
                     if (!isSimilarOrRecommendations)
                     {
-                        _logger.Info($"Proxying Jellyseerr request for user {jellyfinUserId} to: {requestUri}");
+                        _logger.Info($"Proxying Jellyseerr request for user {jellyfinUserId} to [{instance.Name}]: {requestUri}");
                     }
 
                     var request = new HttpRequestMessage(method, requestUri);
@@ -215,7 +319,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                         return Content(responseContent, "application/json");
                     }
 
-                    _logger.Warning($"Request to Jellyseerr for user {jellyfinUserId} failed. URL: {trimmedUrl}, Status: {response.StatusCode}, Response: {responseContent}");
+                    _logger.Warning($"Request to Jellyseerr for user {jellyfinUserId} failed. Instance: {instance.Name}, URL: {instance.Url}, Status: {response.StatusCode}, Response: {responseContent}");
                     // Store the last error so we can return it if all URLs fail
                     lastStatusCode = (int)response.StatusCode;
                     try
@@ -231,7 +335,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error($"Failed to connect to Jellyseerr URL for user {jellyfinUserId}: {trimmedUrl}. Error: {ex.Message}");
+                    _logger.Error($"Failed to connect to Jellyseerr instance '{instance.Name}' for user {jellyfinUserId}. URL: {instance.Url}. Error: {ex.Message}");
                 }
             }
 
@@ -243,24 +347,41 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
         public async Task<IActionResult> GetJellyseerrStatus()
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || !config.JellyseerrEnabled || string.IsNullOrEmpty(config.JellyseerrApiKey) || string.IsNullOrEmpty(config.JellyseerrUrls))
+            if (config == null || !config.JellyseerrEnabled)
             {
                 return Ok(new { active = false });
             }
 
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
+            var configuredInstances = GetConfiguredJellyseerrInstances(config);
+            if (configuredInstances.Count == 0)
+            {
+                return Ok(new { active = false });
+            }
 
-            foreach (var url in urls)
+            var requestedInstanceId = GetRequestedJellyseerrInstanceId();
+            IEnumerable<JellyseerrInstanceTarget> instancesToCheck = configuredInstances;
+            if (!string.IsNullOrWhiteSpace(requestedInstanceId))
+            {
+                var requested = configuredInstances.FirstOrDefault(i => string.Equals(i.Id, requestedInstanceId, StringComparison.OrdinalIgnoreCase));
+                if (requested == null)
+                {
+                    return Ok(new { active = false });
+                }
+
+                instancesToCheck = new[] { requested };
+            }
+
+            foreach (var instance in instancesToCheck)
             {
                 try
                 {
-                    var response = await httpClient.GetAsync($"{url.Trim().TrimEnd('/')}/api/v1/status");
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+
+                    var response = await httpClient.GetAsync($"{instance.Url}/api/v1/status");
                     if (response.IsSuccessStatusCode)
                     {
-                        // _logger.Info($"Successfully connected to Jellyseerr at {url}. Status is active.");
-                        return Ok(new { active = true });
+                        return Ok(new { active = true, instanceId = instance.Id });
                     }
                 }
                 catch
@@ -269,8 +390,32 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 }
             }
 
-            _logger.Warning("Could not establish a connection with any configured Jellyseerr URL. Status is inactive.");
+            _logger.Warning("Could not establish a connection with any configured Jellyseerr instance. Status is inactive.");
             return Ok(new { active = false });
+        }
+
+        [HttpGet("jellyseerr/instances")]
+        [Authorize]
+        public IActionResult GetJellyseerrInstances()
+        {
+            var config = JellyfinEnhanced.Instance?.Configuration;
+            if (config == null || !config.JellyseerrEnabled)
+            {
+                return Ok(new { instances = Array.Empty<object>(), defaultInstanceId = string.Empty });
+            }
+
+            var instances = GetConfiguredJellyseerrInstances(config);
+            var payload = instances.Select(i => new
+            {
+                id = i.Id,
+                name = i.Name
+            }).ToArray();
+
+            return Ok(new
+            {
+                instances = payload,
+                defaultInstanceId = payload.FirstOrDefault()?.id ?? string.Empty
+            });
         }
 
         [HttpGet("jellyseerr/validate")]
@@ -308,6 +453,8 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
         [Authorize]
         public async Task<IActionResult> GetJellyseerrUserStatus()
         {
+            var requestedInstanceId = GetRequestedJellyseerrInstanceId();
+
             // First check active status
             var activeResult = await GetJellyseerrStatus() as OkObjectResult;
             bool active = false;
@@ -329,7 +476,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             {
                 return Ok(new { active = true, userFound = false });
             }
-            var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId);
+            var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId, requestedInstanceId);
             return Ok(new { active = true, userFound = !string.IsNullOrEmpty(jellyseerrUserId) });
         }
 
@@ -1179,24 +1326,41 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
         public async Task<IActionResult> GetJellyseerrPartialRequestsSetting()
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || !config.JellyseerrEnabled || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            if (config == null || !config.JellyseerrEnabled)
             {
                 _logger.Warning("Jellyseerr integration is not configured or enabled.");
                 return Ok(new { partialRequestsEnabled = false });
             }
 
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
-
-            foreach (var url in urls)
+            var configuredInstances = GetConfiguredJellyseerrInstances(config);
+            if (configuredInstances.Count == 0)
             {
-                var trimmedUrl = url.Trim();
+                _logger.Warning("Jellyseerr integration is missing valid URL/API key configuration.");
+                return Ok(new { partialRequestsEnabled = false });
+            }
+
+            var requestedInstanceId = GetRequestedJellyseerrInstanceId();
+            IEnumerable<JellyseerrInstanceTarget> instancesToCheck = configuredInstances;
+            if (!string.IsNullOrWhiteSpace(requestedInstanceId))
+            {
+                var requested = configuredInstances.FirstOrDefault(i => string.Equals(i.Id, requestedInstanceId, StringComparison.OrdinalIgnoreCase));
+                if (requested == null)
+                {
+                    return Ok(new { partialRequestsEnabled = false });
+                }
+
+                instancesToCheck = new[] { requested };
+            }
+
+            foreach (var instance in instancesToCheck)
+            {
                 try
                 {
-                    var requestUri = $"{trimmedUrl.TrimEnd('/')}/api/v1/settings/main";
+                    var requestUri = $"{instance.Url}/api/v1/settings/main";
                     _logger.Info($"Fetching Jellyseerr partial requests setting from: {requestUri}");
 
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
                     var response = await httpClient.GetAsync(requestUri);
                     var responseContent = await response.Content.ReadAsStringAsync();
 
@@ -1214,11 +1378,11 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                         return Ok(new { partialRequestsEnabled });
                     }
 
-                    _logger.Warning($"Failed to fetch Jellyseerr settings. URL: {trimmedUrl}, Status: {response.StatusCode}");
+                    _logger.Warning($"Failed to fetch Jellyseerr settings. URL: {instance.Url}, Status: {response.StatusCode}");
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error($"Failed to connect to Jellyseerr URL: {trimmedUrl}. Error: {ex.Message}");
+                    _logger.Error($"Failed to connect to Jellyseerr URL: {instance.Url}. Error: {ex.Message}");
                 }
             }
 
@@ -1281,13 +1445,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             string jellyseerrBaseUrl = string.Empty;
             try
             {
-                if (!string.IsNullOrWhiteSpace(config.JellyseerrUrls))
-                {
-                    jellyseerrBaseUrl = config.JellyseerrUrls
-                        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                        .Select(u => u.Trim())
-                        .FirstOrDefault() ?? string.Empty;
-                }
+                jellyseerrBaseUrl = GetConfiguredJellyseerrInstances(config).FirstOrDefault()?.Url ?? string.Empty;
             }
             catch { /* ignore */ }
 
@@ -1318,6 +1476,8 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             {
                 return StatusCode(503);
             }
+
+            JellyfinEnhanced.Instance?.SyncCustomTabsConfiguration();
 
             return new JsonResult(new
             {
@@ -2369,7 +2529,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
         /// </summary>
         [HttpGet("arr/requests")]
         [Authorize]
-        public async Task<IActionResult> GetRequests([FromQuery] int take = 20, [FromQuery] int skip = 0, [FromQuery] string? filter = null, [FromQuery] bool userOnly = false)
+        public async Task<IActionResult> GetRequests([FromQuery] int take = 20, [FromQuery] int skip = 0, [FromQuery] string? filter = null, [FromQuery] bool userOnly = false, [FromQuery] string? instanceId = null)
         {
             take = Math.Clamp(take, 1, 200);
             skip = Math.Max(0, skip);
@@ -2378,16 +2538,33 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             if (config == null)
                 return StatusCode(500, "Plugin configuration not available");
 
-            if (string.IsNullOrWhiteSpace(config.JellyseerrUrls) || string.IsNullOrWhiteSpace(config.JellyseerrApiKey))
+            var configuredInstances = GetConfiguredJellyseerrInstances(config);
+            if (configuredInstances.Count == 0)
             {
                 return Ok(new { requests = new List<object>(), totalPages = 0, totalResults = 0 });
             }
 
             try
             {
-                var jellyseerrUrl = config.JellyseerrUrls.Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim().TrimEnd('/');
+                JellyseerrInstanceTarget selectedInstance;
+                if (!string.IsNullOrWhiteSpace(instanceId))
+                {
+                    var requested = configuredInstances.FirstOrDefault(i => string.Equals(i.Id, instanceId, StringComparison.OrdinalIgnoreCase));
+                    if (requested == null)
+                    {
+                        return BadRequest(new { message = $"Seerr instance '{instanceId}' was not found." });
+                    }
+
+                    selectedInstance = requested;
+                }
+                else
+                {
+                    selectedInstance = configuredInstances[0];
+                }
+
+                var jellyseerrUrl = selectedInstance.Url;
                 var client = _httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
+                client.DefaultRequestHeaders.Add("X-Api-Key", selectedInstance.ApiKey);
                 client.Timeout = TimeSpan.FromSeconds(15);
                 bool hasRequestViewPermission = false;
 
@@ -2399,7 +2576,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                     return BadRequest(new { message = "Jellyfin User ID was not provided in claims." });
                 }
 
-                var jellyseerrUser = await GetJellyseerrUser(jellyfinUserId);
+                var jellyseerrUser = await GetJellyseerrUser(jellyfinUserId, selectedInstance.Id);
 
                 if (jellyseerrUser == null)
                 {
@@ -2529,7 +2706,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                         string? avatarUrl = null;
                         if (!string.IsNullOrEmpty(avatar))
                         {
-                            avatarUrl = $"/JellyfinEnhanced/proxy/avatar?path={Uri.EscapeDataString(avatar)}";
+                            avatarUrl = $"/JellyfinEnhanced/proxy/avatar?instanceId={Uri.EscapeDataString(selectedInstance.Id)}&path={Uri.EscapeDataString(avatar)}";
                         }
 
                         // Handle createdAt - could be string or DateTime
@@ -3218,19 +3395,33 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
         /// </summary>
         [HttpGet("proxy/avatar")]
         [AllowAnonymous]
-        public async Task<IActionResult> ProxyAvatar([FromQuery] string path)
+        public async Task<IActionResult> ProxyAvatar([FromQuery] string path, [FromQuery] string? instanceId = null)
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(path))
+            if (config == null || string.IsNullOrEmpty(path))
             {
                 return NotFound();
             }
 
             try
             {
-                var jellyseerrUrl = config.JellyseerrUrls.Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim().TrimEnd('/');
+                var configuredInstances = GetConfiguredJellyseerrInstances(config);
+                if (configuredInstances.Count == 0)
+                {
+                    return NotFound();
+                }
+
+                var selectedInstance = !string.IsNullOrWhiteSpace(instanceId)
+                    ? configuredInstances.FirstOrDefault(i => string.Equals(i.Id, instanceId, StringComparison.OrdinalIgnoreCase))
+                    : configuredInstances.FirstOrDefault();
+
+                if (selectedInstance == null)
+                {
+                    return NotFound();
+                }
+
                 var client = _httpClientFactory.CreateClient();
-                var url = $"{jellyseerrUrl}{path}";
+                var url = $"{selectedInstance.Url}{path}";
 
                 var response = await client.GetAsync(url);
                 if (!response.IsSuccessStatusCode)

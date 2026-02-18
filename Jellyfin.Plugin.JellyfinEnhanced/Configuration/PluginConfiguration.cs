@@ -104,6 +104,8 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Configuration
             JellyseerrUseMoreInfoModal = false;
             JellyseerrUrls = "";
             JellyseerrApiKey = "";
+            JellyseerrApiKeys = "";
+            JellyseerrInstanceNames = "";
             JellyseerrUrlMappings = "";
             ShowCollectionsInSearch = true;
 
@@ -267,6 +269,8 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Configuration
         public bool JellyseerrUseMoreInfoModal { get; set; } = false;
         public string JellyseerrUrls { get; set; }
         public string JellyseerrApiKey { get; set; }
+        public string JellyseerrApiKeys { get; set; }
+        public string JellyseerrInstanceNames { get; set; }
         public string JellyseerrUrlMappings { get; set; }
         public bool ShowCollectionsInSearch { get; set; }
 

@@ -19,6 +19,7 @@ using Newtonsoft.Json;
 using MediaBrowser.Common.Net;
 using System.Reflection;
 using System.Runtime.Loader;
+using System.Xml.Linq;
 
 namespace Jellyfin.Plugin.JellyfinEnhanced
 {
@@ -27,6 +28,8 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
         private readonly IApplicationPaths _applicationPaths;
         private readonly Logger _logger;
         private const string PluginName = "Jellyfin Enhanced";
+        private const string ManagedRequestsCustomTabMarker = "data-je-managed=\"requests-seerr\"";
+        private readonly object _customTabsSyncLock = new();
 
         public JellyfinEnhanced(IApplicationPaths applicationPaths, IServerConfigurationManager serverConfigurationManager, IXmlSerializer xmlSerializer, Logger logger) : base(applicationPaths, xmlSerializer)
         {
@@ -36,6 +39,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
             _logger.Info($"{PluginName} v{Version} initialized. Plugin logs will be written to: {_logger.CurrentLogFilePath}");
             CleanupOldScript();
             CheckPluginPages(applicationPaths, serverConfigurationManager, 1);
+            SyncCustomTabsConfiguration();
         }
 
         public override string Name => PluginName;
@@ -43,6 +47,18 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
         public static JellyfinEnhanced? Instance { get; private set; }
 
         private string IndexHtmlPath => Path.Combine(_applicationPaths.WebPath, "index.html");
+
+        private sealed class ManagedCustomTab
+        {
+            public string Title { get; init; } = string.Empty;
+            public string ContentHtml { get; init; } = string.Empty;
+        }
+
+        private sealed class JellyseerrInstanceTab
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Name { get; init; } = string.Empty;
+        }
 
         public static string BrandingDirectory
         {
@@ -61,6 +77,211 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
 
                 var pluginFolderName = Path.GetFileNameWithoutExtension(configPath) ?? "Jellyfin.Plugin.JellyfinEnhanced";
                 return Path.Combine(configDir, pluginFolderName, "custom_branding");
+            }
+        }
+
+        private static string[] SplitConfigLines(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return Array.Empty<string>();
+            }
+
+            return value
+                .Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(v => v.Trim())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .ToArray();
+        }
+
+        private static string NormalizeHtml(string? html)
+        {
+            return Regex.Replace(html ?? string.Empty, "\\s+", string.Empty).ToLowerInvariant();
+        }
+
+        private static bool IsManagedRequestsCustomTab(string? contentHtml)
+        {
+            if (string.IsNullOrWhiteSpace(contentHtml))
+            {
+                return false;
+            }
+
+            return contentHtml.Contains(ManagedRequestsCustomTabMarker, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsLegacyRequestsCustomTab(string? contentHtml)
+        {
+            if (string.IsNullOrWhiteSpace(contentHtml))
+            {
+                return false;
+            }
+
+            var normalized = NormalizeHtml(contentHtml);
+            return normalized == "<divclass=\"jellyfinenhancedrequests\"></div>"
+                || normalized == "<divclass='jellyfinenhancedrequests'></div>";
+        }
+
+        private List<JellyseerrInstanceTab> GetConfiguredJellyseerrInstancesForTabs(PluginConfiguration? config)
+        {
+            var instances = new List<JellyseerrInstanceTab>();
+            if (config == null)
+            {
+                return instances;
+            }
+
+            var urls = SplitConfigLines(config.JellyseerrUrls);
+            if (urls.Length == 0)
+            {
+                return instances;
+            }
+
+            var apiKeys = !string.IsNullOrWhiteSpace(config.JellyseerrApiKeys)
+                ? SplitConfigLines(config.JellyseerrApiKeys)
+                : SplitConfigLines(config.JellyseerrApiKey);
+            var names = SplitConfigLines(config.JellyseerrInstanceNames);
+            var useSharedApiKey = apiKeys.Length == 1;
+
+            for (var i = 0; i < urls.Length; i++)
+            {
+                var apiKey = useSharedApiKey ? apiKeys.FirstOrDefault() : (i < apiKeys.Length ? apiKeys[i] : string.Empty);
+                if (string.IsNullOrWhiteSpace(apiKey))
+                {
+                    continue;
+                }
+
+                var name = i < names.Length && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : $"Seerr {i + 1}";
+                instances.Add(new JellyseerrInstanceTab
+                {
+                    Id = $"seerr-{i + 1}",
+                    Name = name
+                });
+            }
+
+            return instances;
+        }
+
+        private List<ManagedCustomTab> BuildManagedRequestsCustomTabs(PluginConfiguration config)
+        {
+            var tabs = new List<ManagedCustomTab>();
+            if (!config.DownloadsPageEnabled || !config.DownloadsUseCustomTabs)
+            {
+                return tabs;
+            }
+
+            var baseTitle = "Requests";
+            var instances = config.JellyseerrEnabled
+                ? GetConfiguredJellyseerrInstancesForTabs(config)
+                : new List<JellyseerrInstanceTab>();
+
+            if (instances.Count > 1)
+            {
+                foreach (var instance in instances)
+                {
+                    tabs.Add(new ManagedCustomTab
+                    {
+                        Title = instance.Name,
+                        ContentHtml = $"<div class=\"jellyfinenhanced requests\" {ManagedRequestsCustomTabMarker} data-je-seerr-instance-id=\"{instance.Id}\"></div>"
+                    });
+                }
+
+                return tabs;
+            }
+
+            var singleInstanceId = instances.FirstOrDefault()?.Id;
+            var instanceAttr = string.IsNullOrWhiteSpace(singleInstanceId)
+                ? string.Empty
+                : $" data-je-seerr-instance-id=\"{singleInstanceId}\"";
+
+            tabs.Add(new ManagedCustomTab
+            {
+                Title = instances.FirstOrDefault()?.Name ?? baseTitle,
+                ContentHtml = $"<div class=\"jellyfinenhanced requests\" {ManagedRequestsCustomTabMarker}{instanceAttr}></div>"
+            });
+
+            return tabs;
+        }
+
+        public void SyncCustomTabsConfiguration()
+        {
+            lock (_customTabsSyncLock)
+            {
+                try
+                {
+                    var customTabsConfigPath = Path.Combine(_applicationPaths.PluginConfigurationsPath, "Jellyfin.Plugin.CustomTabs.xml");
+                    if (!File.Exists(customTabsConfigPath))
+                    {
+                        return;
+                    }
+
+                    var pluginConfig = Configuration;
+                    var desiredTabs = BuildManagedRequestsCustomTabs(pluginConfig);
+
+                    var document = XDocument.Load(customTabsConfigPath);
+                    var root = document.Root;
+                    if (root == null)
+                    {
+                        return;
+                    }
+
+                    var tabsElement = root.Element("Tabs");
+                    if (tabsElement == null)
+                    {
+                        tabsElement = new XElement("Tabs");
+                        root.Add(tabsElement);
+                    }
+
+                    var existingTabs = tabsElement.Elements().ToList();
+                    var managedExistingTabs = existingTabs
+                        .Where(tab => IsManagedRequestsCustomTab(tab.Element("ContentHtml")?.Value))
+                        .ToList();
+
+                    var legacyExistingTabs = desiredTabs.Count > 0
+                        ? existingTabs
+                            .Where(tab => IsLegacyRequestsCustomTab(tab.Element("ContentHtml")?.Value))
+                            .ToList()
+                        : new List<XElement>();
+
+                    var existingManagedProjection = managedExistingTabs
+                        .Select(tab => new ManagedCustomTab
+                        {
+                            Title = tab.Element("Title")?.Value ?? string.Empty,
+                            ContentHtml = tab.Element("ContentHtml")?.Value ?? string.Empty
+                        })
+                        .ToList();
+
+                    bool shouldRewrite = managedExistingTabs.Count != desiredTabs.Count
+                        || legacyExistingTabs.Count > 0
+                        || existingManagedProjection.Zip(desiredTabs, (a, b) => a.Title == b.Title && a.ContentHtml == b.ContentHtml).Any(equal => !equal);
+
+                    if (!shouldRewrite)
+                    {
+                        return;
+                    }
+
+                    foreach (var tab in managedExistingTabs)
+                    {
+                        tab.Remove();
+                    }
+
+                    foreach (var tab in legacyExistingTabs)
+                    {
+                        tab.Remove();
+                    }
+
+                    foreach (var desiredTab in desiredTabs)
+                    {
+                        tabsElement.Add(new XElement("TabConfig",
+                            new XElement("Title", desiredTab.Title),
+                            new XElement("ContentHtml", desiredTab.ContentHtml)));
+                    }
+
+                    document.Save(customTabsConfigPath);
+                    _logger.Info($"Synced {desiredTabs.Count} managed Requests tab(s) to Custom Tabs config.");
+                }
+                catch (Exception ex)
+                {
+                    _logger.Warning($"Failed to sync Custom Tabs configuration: {ex.Message}");
+                }
             }
         }
 

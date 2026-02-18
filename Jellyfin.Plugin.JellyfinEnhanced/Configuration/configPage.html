@@ -469,18 +469,23 @@
                             <div class="inputContainer">
                                 <label class="sectionTitle" style="margin-bottom: 5px;" for="jellyseerrUrls">Seerr URL(s)</label>
                                 <textarea style="display:block; height: 8vh !important;" class="emby-textarea emby-input" id="jellyseerrUrls" name="jellyseerrUrls" placeholder="http://192.168.1.10:5055&#10;https://jellyseerr.example.com"></textarea>
-                                <div class="fieldDescription">Enter your Seerr instance URLs, one per line. The script will use the first one that connects successfully.</div>
+                                <div class="fieldDescription">Enter your Seerr instance URLs, one per line.</div>
                             </div>
                             <div class="inputContainer">
-                                <label class="inputLabel inputLabelUnfocused" for="JellyseerrApiKey">Seerr API Key</label>
-                                <div style="display: flex; align-items: center; gap: 1em; margin-left: -1em;">
-                                    <input id="JellyseerrApiKey" is="emby-input" name="JellyseerrApiKey" type="text" style="flex-grow: 1;"/>
+                                <label class="sectionTitle" style="margin-bottom: 5px;" for="jellyseerrInstanceNames">Seerr Instance Name(s) (Optional)</label>
+                                <textarea style="display:block; height: 8vh !important;" class="emby-textarea emby-input" id="jellyseerrInstanceNames" name="jellyseerrInstanceNames" placeholder="Main Seerr&#10;Anime Seerr"></textarea>
+                                <div class="fieldDescription">Optional names for each Seerr instance, one per line in the same order as the URLs. These names are used as the Requests page tabs.</div>
+                            </div>
+                            <div class="inputContainer">
+                                <label class="sectionTitle" style="margin-bottom: 5px;" for="jellyseerrApiKeys">Seerr API Key(s)</label>
+                                <div style="display: flex; align-items: center; gap: 1em;">
+                                    <textarea style="display:block; height: 8vh !important; flex-grow: 1;" class="emby-textarea emby-input" id="jellyseerrApiKeys" name="jellyseerrApiKeys" placeholder="single-key-for-all&#10;or-key-per-instance"></textarea>
                                     <span id="jellyseerrStatusIndicator" class="material-icons" style="transition: color 0.3s ease;"></span>
                                     <button is="emby-button" type="button" id="testJellyseerrBtn" class="raised button-submit">
                                         <span>Test</span>
                                     </button>
                                 </div>
-                                <div class="fieldDescription">API key from Jellyseerr. (Settings > General Settings >  API Key)</div>
+                                <div class="fieldDescription">One key for all instances, or one key per line matching the URL order. (Seerr: Settings &gt; General Settings &gt; API Key)</div>
                             </div>
                             <div class="inputContainer">
                                 <label class="inputLabel inputLabelUnfocused" for="jellyseerr_TMDB_API_KEY">TMDB API Key</label>
@@ -1024,6 +1029,9 @@
                                             <li style="margin-bottom: 0.5em;">Add "Display Text" according to your preference (e.g., "Requests")</li>
                                             <li style="margin-bottom: 0.5em;">Copy the code below and paste it into the 'HTML Content' field.</li>
                                         </ol>
+                                        <p class="fieldDescription" style="margin: 0.5em 0;">
+                                            When multiple Seerr instances are configured above, Jellyfin Enhanced can automatically sync one top navbar tab per instance using the configured instance names.
+                                        </p>
                                         <div style="position: relative;">
                                             <button type="button" class="je-copy-html-btn raised raised-mini emby-button" data-copy-text="&lt;div class=&quot;jellyfinenhanced requests&quot;&gt;&lt;/div&gt;" style="position: absolute; top: 8px; right: 8px; background-color: rgba(255,255,255,0.1); border: none; padding: 4px 8px; min-width: 80px; transition: color 0.3s;">
                                                 <i class="material-icons" style="font-size: 16px; margin-right: 4px; vertical-align: middle;">content_copy</i>
@@ -1734,12 +1742,25 @@
             }
         });
 
-        async function testJellyseerrConnection() {
-            const urls = (document.querySelector('#jellyseerrUrls').value || '').split('\n').map(u => u.trim()).filter(Boolean);
-            const apiKey = (document.querySelector('#JellyseerrApiKey').value || '').trim();
+        function getLinesFromTextarea(selector) {
+            return (document.querySelector(selector)?.value || '')
+                .split('\n')
+                .map(v => v.trim())
+                .filter(Boolean);
+        }
 
-            if (!urls.length || !apiKey) {
-                Dashboard.alert({ title: 'Missing Information', message: 'Please provide at least one Seerr URL and an API key to test the connection.' });
+        function getSeerrApiKeyForIndex(apiKeys, index) {
+            if (!Array.isArray(apiKeys) || apiKeys.length === 0) return '';
+            if (apiKeys.length === 1) return apiKeys[0];
+            return apiKeys[index] || '';
+        }
+
+        async function testJellyseerrConnection() {
+            const urls = getLinesFromTextarea('#jellyseerrUrls');
+            const apiKeys = getLinesFromTextarea('#jellyseerrApiKeys');
+
+            if (!urls.length || !apiKeys.length) {
+                Dashboard.alert({ title: 'Missing Information', message: 'Please provide at least one Seerr URL and API key to test the connection.' });
                 return;
             }
 
@@ -1749,7 +1770,13 @@
             jellyseerrStatusIndicator.style.color = '#00a4dc';
 
             let validated = false;
-            for (const url of urls) {
+            for (let i = 0; i < urls.length; i++) {
+                const url = urls[i];
+                const apiKey = getSeerrApiKeyForIndex(apiKeys, i);
+                if (!apiKey) {
+                    continue;
+                }
+
                 try {
                     const validationUrl = ApiClient.getUrl(`/JellyfinEnhanced/jellyseerr/validate`, {
                         url: url,
@@ -1980,7 +2007,8 @@
                 document.querySelector('#jellyseerrExcludeRejectedItems').checked = !!config.JellyseerrExcludeRejectedItems;
                 document.querySelector('#showElsewhereOnJellyseerr').checked = config.ShowElsewhereOnJellyseerr;
                 document.querySelector('#jellyseerrUrls').value = config.JellyseerrUrls;
-                document.querySelector('#JellyseerrApiKey').value = config.JellyseerrApiKey;
+                document.querySelector('#jellyseerrApiKeys').value = config.JellyseerrApiKeys || config.JellyseerrApiKey || '';
+                document.querySelector('#jellyseerrInstanceNames').value = config.JellyseerrInstanceNames || '';
                 document.querySelector('#jellyseerrUrlMappings').value = config.JellyseerrUrlMappings || '';
                 document.querySelector('#jellyseerr_TMDB_API_KEY').value = config.TMDB_API_KEY;
                 document.querySelector('#autoSeasonRequestEnabled').checked = config.AutoSeasonRequestEnabled || false;
@@ -2152,8 +2180,13 @@
             config.JellyseerrShowPersonDiscovery = document.querySelector('#jellyseerrShowPersonDiscovery').checked;
             config.JellyseerrShowReportButton = document.querySelector('#jellyseerrShowReportButton').checked;
             config.ShowElsewhereOnJellyseerr = document.querySelector('#showElsewhereOnJellyseerr').checked;
-            config.JellyseerrUrls = (document.querySelector('#jellyseerrUrls').value || '').split('\n').map(u => u.trim()).filter(Boolean).join('\n');
-            config.JellyseerrApiKey = (document.querySelector('#JellyseerrApiKey').value || '').trim();
+            const jellyseerrUrls = getLinesFromTextarea('#jellyseerrUrls');
+            const jellyseerrApiKeys = getLinesFromTextarea('#jellyseerrApiKeys');
+            const jellyseerrInstanceNames = getLinesFromTextarea('#jellyseerrInstanceNames');
+            config.JellyseerrUrls = jellyseerrUrls.join('\n');
+            config.JellyseerrApiKeys = jellyseerrApiKeys.join('\n');
+            config.JellyseerrApiKey = jellyseerrApiKeys[0] || '';
+            config.JellyseerrInstanceNames = jellyseerrInstanceNames.join('\n');
             config.JellyseerrUrlMappings = (document.querySelector('#jellyseerrUrlMappings').value || '').split('\n').map(u => u.trim()).filter(Boolean).join('\n');
             config.TMDB_API_KEY = document.querySelector('#jellyseerr_TMDB_API_KEY').value;
             config.AutoSeasonRequestEnabled = document.querySelector('#autoSeasonRequestEnabled').checked;

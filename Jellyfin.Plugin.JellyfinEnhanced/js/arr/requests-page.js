@@ -16,6 +16,8 @@
     requestsPage: 1,
     requestsTotalPages: 1,
     requestsFilter: "all",
+    seerrInstances: [],
+    activeSeerrInstanceId: null,
     issues: [],
     issuesPage: 1,
     issuesTotalPages: 1,
@@ -192,6 +194,7 @@
           opacity: 0.95;
           margin-top: 0.6em;
         }
+        .je-requests-instance-tabs,
         .je-requests-tabs,
         .je-issues-tabs {
             display: flex;
@@ -199,6 +202,10 @@
             margin-bottom: 1em;
             flex-wrap: wrap;
         }
+        .je-requests-instance-tabs {
+            margin-bottom: 0.75em;
+        }
+        .je-requests-instance-tab.emby-button,
         .je-requests-tab.emby-button,
         .je-issues-tab.emby-button {
             background: transparent;
@@ -210,11 +217,13 @@
             opacity: 0.7;
             transition: all 0.2s;
         }
+        .je-requests-instance-tab.emby-button:hover,
         .je-requests-tab.emby-button:hover,
         .je-issues-tab.emby-button:hover {
             opacity: 1;
             background: rgba(255,255,255,0.1);
         }
+        .je-requests-instance-tab.emby-button.active,
         .je-requests-tab.emby-button.active,
         .je-issues-tab.emby-button.active {
             opacity: 1;
@@ -600,6 +609,7 @@
     themeStyle.id = "je-downloads-theme-colors";
     themeStyle.textContent = `
       .je-requests-tab.emby-button.active,
+      .je-requests-instance-tab.emby-button.active,
       .je-issues-tab.emby-button.active,
       .je-downloads-tab.emby-button.active {
         background: ${primaryAccent} !important;
@@ -644,18 +654,66 @@
   }
 
   /**
+   * Fetch configured Seerr instances for tab switching.
+   */
+  async function fetchSeerrInstances() {
+    if (!JE.pluginConfig?.JellyseerrEnabled) {
+      state.seerrInstances = [];
+      state.activeSeerrInstanceId = null;
+      return null;
+    }
+
+    try {
+      const data = await ApiClient.ajax({
+        type: "GET",
+        url: ApiClient.getUrl("/JellyfinEnhanced/jellyseerr/instances"),
+        dataType: "json",
+        headers: { "X-Jellyfin-User-Id": ApiClient.getCurrentUserId() },
+      });
+
+      const instances = Array.isArray(data?.instances)
+        ? data.instances.filter((item) => item && item.id)
+        : [];
+      state.seerrInstances = instances;
+
+      const hasActive = !!state.activeSeerrInstanceId
+        && instances.some((item) => item.id === state.activeSeerrInstanceId);
+      if (!hasActive) {
+        state.activeSeerrInstanceId = data?.defaultInstanceId || instances[0]?.id || null;
+      }
+
+      return instances;
+    } catch (error) {
+      console.error(`${logPrefix} Failed to fetch Seerr instances:`, error);
+      state.seerrInstances = [];
+      state.activeSeerrInstanceId = null;
+      return null;
+    }
+  }
+
+  /**
    * Fetch requests from backend
    */
   async function fetchRequests() {
+    if (JE.pluginConfig?.JellyseerrEnabled && state.seerrInstances.length === 0) {
+      state.requests = [];
+      state.requestsTotalPages = 1;
+      return null;
+    }
+
     try {
       const skip = (state.requestsPage - 1) * 20;
       const filter = state.requestsFilter !== "all" ? state.requestsFilter : "";
-
-      const url = ApiClient.getUrl("/JellyfinEnhanced/arr/requests", {
+      const query = {
         take: 20,
         skip: skip,
         filter: filter,
-      });
+      };
+      if (state.activeSeerrInstanceId) {
+        query.instanceId = state.activeSeerrInstanceId;
+      }
+
+      const url = ApiClient.getUrl("/JellyfinEnhanced/arr/requests", query);
 
       const response = await fetch(url, {
         headers: getAuthHeaders(),
@@ -712,17 +770,22 @@
 
   async function fetchIssueMediaDetails(mediaType, tmdbId) {
     if (!mediaType || !tmdbId) return null;
-    const cacheKey = `${mediaType}:${tmdbId}`;
+    const instanceKey = state.activeSeerrInstanceId || "default";
+    const cacheKey = `${instanceKey}:${mediaType}:${tmdbId}`;
     if (issueMediaCache.has(cacheKey)) return issueMediaCache.get(cacheKey);
 
     const path = mediaType === "tv"
       ? `/JellyfinEnhanced/jellyseerr/tv/${tmdbId}`
       : `/JellyfinEnhanced/jellyseerr/movie/${tmdbId}`;
+    const query = {};
+    if (state.activeSeerrInstanceId) {
+      query.instanceId = state.activeSeerrInstanceId;
+    }
 
     try {
       const data = await ApiClient.ajax({
         type: "GET",
-        url: ApiClient.getUrl(path),
+        url: ApiClient.getUrl(path, query),
         dataType: "json",
         headers: { "X-Jellyfin-User-Id": ApiClient.getCurrentUserId() },
       });
@@ -745,15 +808,26 @@
       return null;
     }
 
+    if (state.seerrInstances.length === 0) {
+      state.issues = [];
+      state.issuesTotalPages = 1;
+      state.issuesError = false;
+      return null;
+    }
+
     try {
       const skip = (state.issuesPage - 1) * 20;
       const filter = state.issuesFilter || "open";
-      const url = ApiClient.getUrl("/JellyfinEnhanced/jellyseerr/issue", {
+      const query = {
         take: 20,
         skip: skip,
         filter: filter,
         sort: "added",
-      });
+      };
+      if (state.activeSeerrInstanceId) {
+        query.instanceId = state.activeSeerrInstanceId;
+      }
+      const url = ApiClient.getUrl("/JellyfinEnhanced/jellyseerr/issue", query);
 
       const data = await ApiClient.ajax({
         type: "GET",
@@ -793,6 +867,10 @@
   async function loadAllData() {
     state.isLoading = true;
     renderPage();
+
+    if (JE.pluginConfig?.JellyseerrEnabled) {
+      await fetchSeerrInstances();
+    }
 
     await Promise.all([fetchDownloads(), fetchRequests(), fetchIssues()]);
 
@@ -1548,6 +1626,17 @@
       const labelRequests = (JE.t && JE.t('requests_requests')) || 'Requests';
       html += `<h2>${labelRequests}</h2>`;
 
+        if (state.seerrInstances.length > 1 && !JE.pluginConfig?.DownloadsUseCustomTabs) {
+          html += `<div class="je-requests-instance-tabs">`;
+          state.seerrInstances.forEach((instance) => {
+            const isActive = state.activeSeerrInstanceId === instance.id;
+            const label = escapeHtml(instance.name || "Seerr");
+            const instanceId = escapeHtml(instance.id || "");
+            html += `<button is="emby-button" type="button" class="je-requests-instance-tab emby-button ${isActive ? "active" : ""}" data-instance-id="${instanceId}">${label}</button>`;
+          });
+          html += `</div>`;
+        }
+
         // Filter tabs
         const labelAll = (JE.t && JE.t('jellyseerr_discover_all')) || 'All';
         const labelPending = (JE.t && JE.t('jellyseerr_btn_pending')) || 'Pending Approval';
@@ -1690,6 +1779,17 @@
         const tabName = tab.getAttribute('data-tab');
         state.downloadsActiveTab = tabName;
         renderPage();
+      });
+    });
+
+    const instanceTabs = container.querySelectorAll('.je-requests-instance-tab');
+    instanceTabs.forEach(tab => {
+      tab.addEventListener('click', (e) => {
+        e.preventDefault();
+        const instanceId = tab.getAttribute('data-instance-id');
+        if (instanceId) {
+          selectSeerrInstance(instanceId);
+        }
       });
     });
 
@@ -1989,6 +2089,15 @@
     fetchRequests().then(() => renderPage());
   }
 
+  function selectSeerrInstance(instanceId) {
+    if (!instanceId || state.activeSeerrInstanceId === instanceId) return;
+    state.activeSeerrInstanceId = instanceId;
+    state.requestsPage = 1;
+    state.issuesPage = 1;
+    issueMediaCache.clear();
+    loadAllData();
+  }
+
   function filterIssues(filter) {
     if (!filter || (filter !== "open" && filter !== "resolved")) return;
     if (state.issuesFilter === filter) return;
@@ -2263,8 +2372,19 @@
   /**
    * Render content for custom tabs (without page state management)
    */
-  function renderForCustomTab() {
+  function renderForCustomTab(options = {}) {
     state._customTabMode = true;
+
+    const requestedInstanceId = typeof options.instanceId === "string"
+      ? options.instanceId.trim()
+      : "";
+    if (requestedInstanceId && state.activeSeerrInstanceId !== requestedInstanceId) {
+      state.activeSeerrInstanceId = requestedInstanceId;
+      state.requestsPage = 1;
+      state.issuesPage = 1;
+      issueMediaCache.clear();
+    }
+
     injectStyles();
     renderPage();
     loadAllData();
@@ -2282,6 +2402,7 @@
     filterDownloads,
     searchDownloads,
     filterRequests,
+    selectSeerrInstance,
     filterIssues,
     nextPage,
     prevPage,
