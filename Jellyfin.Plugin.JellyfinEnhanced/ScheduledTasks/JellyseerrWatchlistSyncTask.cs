@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.JellyfinEnhanced.Configuration;
+using Jellyfin.Plugin.JellyfinEnhanced.Helpers.Jellyseerr;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -73,28 +74,16 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.ScheduledTasks
                 return;
             }
 
-            if (string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            var configuredInstances = JellyseerrInstanceHelper.GetConfiguredInstances(config);
+            if (configuredInstances.Count == 0)
             {
-                _logger.Warning("[Jellyseerr Watchlist Sync] Jellyseerr URL or API key not configured.");
+                _logger.Warning("[Jellyseerr Watchlist Sync] Jellyseerr URL/API key not configured.");
                 progress?.Report(100);
                 return;
             }
 
             _logger.Info("[Jellyseerr Watchlist Sync] Starting Jellyseerr watchlist sync task...");
             progress?.Report(0);
-
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var jellyseerrUrl = urls.FirstOrDefault()?.Trim();
-
-            if (string.IsNullOrEmpty(jellyseerrUrl))
-            {
-                _logger.Warning("[Jellyseerr Watchlist Sync] No valid Jellyseerr URL found.");
-                progress?.Report(100);
-                return;
-            }
-
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
 
             // Get all Jellyfin users
             var jellyfinUsers = _userManager.Users.ToList();
@@ -121,23 +110,43 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.ScheduledTasks
                         _userConfigurationManager.CleanupOldProcessedWatchlistItems(jellyfinUser.Id, config.WatchlistMemoryRetentionDays);
                     }
 
-                    // Get Jellyseerr user ID for this Jellyfin user
-                    var jellyseerrUserId = await GetJellyseerrUserId(httpClient, jellyseerrUrl, jellyfinUser.Id.ToString());
+                    var watchlistItems = new List<WatchlistItem>();
+                    var requestItems = new List<WatchlistItem>();
+                    var hasLinkedSeerrAccount = false;
 
-                    if (string.IsNullOrEmpty(jellyseerrUserId))
+                    foreach (var instance in configuredInstances)
                     {
-                        _logger.Warning($"[Jellyseerr Watchlist Sync] No Jellyseerr account linked for user: {jellyfinUser.Username}");
-                        processedUsers++;
-                        continue;
+                        var httpClient = _httpClientFactory.CreateClient();
+                        httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+
+                        var jellyseerrUserId = await GetJellyseerrUserId(httpClient, instance.Url, jellyfinUser.Id.ToString());
+                        if (string.IsNullOrEmpty(jellyseerrUserId))
+                        {
+                            continue;
+                        }
+
+                        hasLinkedSeerrAccount = true;
+                        var instanceWatchlistItems = await GetJellyseerrWatchlist(httpClient, instance.Url, jellyseerrUserId) ?? new List<WatchlistItem>();
+                        watchlistItems.AddRange(instanceWatchlistItems);
+
+                        if (config.AddRequestedMediaToWatchlist)
+                        {
+                            var instanceRequestItems = await GetJellyseerrRequests(httpClient, instance.Url, jellyseerrUserId) ?? new List<WatchlistItem>();
+                            requestItems.AddRange(instanceRequestItems);
+                        }
                     }
 
-                    // Get watchlist from Jellyseerr
-                    var watchlistItems = await GetJellyseerrWatchlist(httpClient, jellyseerrUrl, jellyseerrUserId) ?? new List<WatchlistItem>();
-
-                    var requestItems = new List<WatchlistItem>();
-                    if (config.AddRequestedMediaToWatchlist)
+                    if (watchlistItems.Count == 0 && requestItems.Count == 0)
                     {
-                        requestItems = await GetJellyseerrRequests(httpClient, jellyseerrUrl, jellyseerrUserId) ?? new List<WatchlistItem>();
+                        if (!hasLinkedSeerrAccount)
+                        {
+                            _logger.Warning($"[Jellyseerr Watchlist Sync] No Jellyseerr account linked for user: {jellyfinUser.Username}");
+                        }
+                        else
+                        {
+                            _logger.Info($"[Jellyseerr Watchlist Sync] No watchlist/request items found for user: {jellyfinUser.Username}");
+                        }
+                        continue;
                     }
 
                     // Log consolidated summary

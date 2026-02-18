@@ -98,18 +98,17 @@
   function watchForContainer(JE) {
     queueRender(JE);
 
+    const observerTarget = document.querySelector('.mainAnimatedPages') || document.body;
     const observer = new MutationObserver(() => {
       queueRender(JE);
     });
-    observer.observe(document.body, {
+    observer.observe(observerTarget, {
       childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['class']
+      subtree: true
     });
 
     document.addEventListener('viewshow', () => queueRender(JE), true);
-    document.addEventListener('click', () => queueRender(JE), true);
+    window.addEventListener('hashchange', () => queueRender(JE), true);
   }
 
   // Initialize

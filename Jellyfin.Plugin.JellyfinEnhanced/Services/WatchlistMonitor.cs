@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.JellyfinEnhanced.Configuration;
+using Jellyfin.Plugin.JellyfinEnhanced.Helpers.Jellyseerr;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -134,19 +135,25 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
                 var mediaType = itemKind == BaseItemKind.Movie ? "movie" : "tv";
                 // _logger.Info($"[Watchlist] New {mediaType} added to library: '{e.Item.Name}' (TMDB: {tmdbId})");
 
-                // Query Jellyseerr for ALL requests in a single API call
-                var jellyseerrUrl = config.JellyseerrUrls?.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim();
-                if (string.IsNullOrEmpty(jellyseerrUrl) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+                var configuredInstances = JellyseerrInstanceHelper.GetConfiguredInstances(config);
+                if (configuredInstances.Count == 0)
                 {
                     _logger.Warning("[Watchlist] Jellyseerr URL or API key not configured");
                     return;
                 }
 
-                var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
+                var allRequests = new List<RequestItemWithUser>();
+                foreach (var instance in configuredInstances)
+                {
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                    var instanceRequests = await GetAllJellyseerrRequests(httpClient, instance.Url);
+                    if (instanceRequests != null && instanceRequests.Count > 0)
+                    {
+                        allRequests.AddRange(instanceRequests);
+                    }
+                }
 
-                // Fetch all requests at once (no X-Api-User header = all requests)
-                var allRequests = await GetAllJellyseerrRequests(httpClient, jellyseerrUrl);
                 if (allRequests == null || allRequests.Count == 0)
                 {
                     return;

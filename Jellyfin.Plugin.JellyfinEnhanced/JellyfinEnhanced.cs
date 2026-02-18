@@ -20,6 +20,7 @@ using MediaBrowser.Common.Net;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Xml.Linq;
+using Jellyfin.Plugin.JellyfinEnhanced.Helpers.Jellyseerr;
 
 namespace Jellyfin.Plugin.JellyfinEnhanced
 {
@@ -54,12 +55,6 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
             public string ContentHtml { get; init; } = string.Empty;
         }
 
-        private sealed class JellyseerrInstanceTab
-        {
-            public string Id { get; init; } = string.Empty;
-            public string Name { get; init; } = string.Empty;
-        }
-
         public static string BrandingDirectory
         {
             get
@@ -78,20 +73,6 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
                 var pluginFolderName = Path.GetFileNameWithoutExtension(configPath) ?? "Jellyfin.Plugin.JellyfinEnhanced";
                 return Path.Combine(configDir, pluginFolderName, "custom_branding");
             }
-        }
-
-        private static string[] SplitConfigLines(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return Array.Empty<string>();
-            }
-
-            return value
-                .Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(v => v.Trim())
-                .Where(v => !string.IsNullOrWhiteSpace(v))
-                .ToArray();
         }
 
         private static string NormalizeHtml(string? html)
@@ -121,45 +102,6 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
                 || normalized == "<divclass='jellyfinenhancedrequests'></div>";
         }
 
-        private List<JellyseerrInstanceTab> GetConfiguredJellyseerrInstancesForTabs(PluginConfiguration? config)
-        {
-            var instances = new List<JellyseerrInstanceTab>();
-            if (config == null)
-            {
-                return instances;
-            }
-
-            var urls = SplitConfigLines(config.JellyseerrUrls);
-            if (urls.Length == 0)
-            {
-                return instances;
-            }
-
-            var apiKeys = !string.IsNullOrWhiteSpace(config.JellyseerrApiKeys)
-                ? SplitConfigLines(config.JellyseerrApiKeys)
-                : SplitConfigLines(config.JellyseerrApiKey);
-            var names = SplitConfigLines(config.JellyseerrInstanceNames);
-            var useSharedApiKey = apiKeys.Length == 1;
-
-            for (var i = 0; i < urls.Length; i++)
-            {
-                var apiKey = useSharedApiKey ? apiKeys.FirstOrDefault() : (i < apiKeys.Length ? apiKeys[i] : string.Empty);
-                if (string.IsNullOrWhiteSpace(apiKey))
-                {
-                    continue;
-                }
-
-                var name = i < names.Length && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : $"Seerr {i + 1}";
-                instances.Add(new JellyseerrInstanceTab
-                {
-                    Id = $"seerr-{i + 1}",
-                    Name = name
-                });
-            }
-
-            return instances;
-        }
-
         private List<ManagedCustomTab> BuildManagedRequestsCustomTabs(PluginConfiguration config)
         {
             var tabs = new List<ManagedCustomTab>();
@@ -170,8 +112,8 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
 
             var baseTitle = "Requests";
             var instances = config.JellyseerrEnabled
-                ? GetConfiguredJellyseerrInstancesForTabs(config)
-                : new List<JellyseerrInstanceTab>();
+                ? JellyseerrInstanceHelper.GetConfiguredInstances(config)
+                : new List<JellyseerrInstanceTarget>();
 
             if (instances.Count > 1)
             {

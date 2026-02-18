@@ -79,67 +79,9 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             _dbContextFactory = dbContextFactory;
         }
 
-        private sealed class JellyseerrInstanceTarget
-        {
-            public string Id { get; init; } = string.Empty;
-            public string Name { get; init; } = string.Empty;
-            public string Url { get; init; } = string.Empty;
-            public string ApiKey { get; init; } = string.Empty;
-        }
-
-        private static string[] SplitConfigLines(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return Array.Empty<string>();
-            }
-
-            return value
-                .Split(new[] { '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(v => v.Trim())
-                .Where(v => !string.IsNullOrWhiteSpace(v))
-                .ToArray();
-        }
-
         private List<JellyseerrInstanceTarget> GetConfiguredJellyseerrInstances(PluginConfiguration? config)
         {
-            var instances = new List<JellyseerrInstanceTarget>();
-            if (config == null)
-            {
-                return instances;
-            }
-
-            var urls = SplitConfigLines(config.JellyseerrUrls);
-            if (urls.Length == 0)
-            {
-                return instances;
-            }
-
-            var apiKeys = !string.IsNullOrWhiteSpace(config.JellyseerrApiKeys)
-                ? SplitConfigLines(config.JellyseerrApiKeys)
-                : SplitConfigLines(config.JellyseerrApiKey);
-            var names = SplitConfigLines(config.JellyseerrInstanceNames);
-            var useSharedApiKey = apiKeys.Length == 1;
-
-            for (var i = 0; i < urls.Length; i++)
-            {
-                var apiKey = useSharedApiKey ? apiKeys.FirstOrDefault() : (i < apiKeys.Length ? apiKeys[i] : string.Empty);
-                if (string.IsNullOrWhiteSpace(apiKey))
-                {
-                    continue;
-                }
-
-                var name = i < names.Length && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : $"Seerr {i + 1}";
-                instances.Add(new JellyseerrInstanceTarget
-                {
-                    Id = $"seerr-{i + 1}",
-                    Name = name,
-                    Url = urls[i].Trim().TrimEnd('/'),
-                    ApiKey = apiKey.Trim()
-                });
-            }
-
-            return instances;
+            return JellyseerrInstanceHelper.GetConfiguredInstances(config);
         }
 
         private string? GetRequestedJellyseerrInstanceId()
@@ -1008,29 +950,23 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                     {
                         _logger.Info($"[Manual Watchlist Sync] Processing user: {user.Username} ({user.Id})");
 
-                        // Get Jellyseerr user ID for this Jellyfin user
-                        var jellyseerrUserId = await GetJellyseerrUserId(user.Id.ToString());
-                        if (string.IsNullOrEmpty(jellyseerrUserId))
-                        {
-                            _logger.Warning($"[Manual Watchlist Sync] Could not find Jellyseerr user for {user.Username}");
-                            continue;
-                        }
-
                         // Get watchlist from Jellyseerr
-                        var watchlistItems = await GetJellyseerrWatchlistForUser(jellyseerrUserId);
-                        if (watchlistItems == null || watchlistItems.Count == 0)
+                        var watchlistItems = await GetJellyseerrWatchlistForUser(user.Id.ToString());
+                        if (watchlistItems.Count == 0)
                         {
                             _logger.Info($"[Manual Watchlist Sync] No watchlist items found for {user.Username}");
-                            watchlistItems = new List<WatchlistItem>();
                         }
 
                         _logger.Info($"[Manual Watchlist Sync] Found {watchlistItems.Count} watchlist items for {user.Username}");
 
-                        var requestItems = await GetJellyseerrRequestsForUser(jellyseerrUserId);
-                        if (requestItems != null && requestItems.Count > 0)
+                        if (config.AddRequestedMediaToWatchlist)
                         {
-                            _logger.Info($"[Manual Watchlist Sync] Found {requestItems.Count} request items for {user.Username}");
-                            watchlistItems.AddRange(requestItems);
+                            var requestItems = await GetJellyseerrRequestsForUser(user.Id.ToString());
+                            if (requestItems.Count > 0)
+                            {
+                                _logger.Info($"[Manual Watchlist Sync] Found {requestItems.Count} request items for {user.Username}");
+                                watchlistItems.AddRange(requestItems);
+                            }
                         }
 
                         var processedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1095,26 +1031,35 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             }
         }
 
-        private async Task<List<WatchlistItem>?> GetJellyseerrWatchlistForUser(string userId)
+        private async Task<List<WatchlistItem>> GetJellyseerrWatchlistForUser(string jellyfinUserId)
         {
+            var items = new List<WatchlistItem>();
+            var dedupe = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             try
             {
                 var config = JellyfinEnhanced.Instance?.Configuration;
-                if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+                var configuredInstances = GetConfiguredJellyseerrInstances(config);
+                if (configuredInstances.Count == 0)
                 {
-                    return null;
+                    return items;
                 }
 
-                var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
-
-                foreach (var url in urls)
+                foreach (var instance in configuredInstances)
                 {
-                    var trimmedUrl = url.Trim();
                     try
                     {
-                        var requestUri = $"{trimmedUrl.TrimEnd('/')}/api/v1/user/{userId}/watchlist";
+                        var jellyseerrUser = await GetJellyseerrUser(jellyfinUserId, instance.Id);
+                        if (jellyseerrUser == null)
+                        {
+                            continue;
+                        }
+
+                        var httpClient = _httpClientFactory.CreateClient();
+                        httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                        httpClient.DefaultRequestHeaders.Add("X-Api-User", jellyseerrUser.Id.ToString());
+
+                        var requestUri = $"{instance.Url}/api/v1/user/{jellyseerrUser.Id}/watchlist";
                         var response = await httpClient.GetAsync(requestUri);
 
                         if (response.IsSuccessStatusCode)
@@ -1124,26 +1069,31 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
 
                             if (json.RootElement.TryGetProperty("results", out var results))
                             {
-                                var items = new List<WatchlistItem>();
                                 foreach (var item in results.EnumerateArray())
                                 {
                                     if (item.TryGetProperty("tmdbId", out var tmdbId) &&
                                         item.TryGetProperty("mediaType", out var mediaType))
                                     {
+                                        var mediaTypeValue = mediaType.GetString() ?? "movie";
+                                        var key = $"{mediaTypeValue}:{tmdbId.GetInt32()}";
+                                        if (!dedupe.Add(key))
+                                        {
+                                            continue;
+                                        }
+
                                         items.Add(new WatchlistItem
                                         {
                                             TmdbId = tmdbId.GetInt32(),
-                                            MediaType = mediaType.GetString() ?? "movie"
+                                            MediaType = mediaTypeValue
                                         });
                                     }
                                 }
-                                return items;
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.Warning($"Failed to get watchlist from {trimmedUrl}: {ex.Message}");
+                        _logger.Warning($"Failed to get watchlist from {instance.Url}: {ex.Message}");
                         continue;
                     }
                 }
@@ -1153,31 +1103,38 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 _logger.Error($"Error getting Jellyseerr watchlist: {ex}");
             }
 
-            return null;
+            return items;
         }
 
-        private async Task<List<WatchlistItem>?> GetJellyseerrRequestsForUser(string userId)
+        private async Task<List<WatchlistItem>> GetJellyseerrRequestsForUser(string jellyfinUserId)
         {
+            var items = new List<WatchlistItem>();
+            var dedupe = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             try
             {
                 var config = JellyfinEnhanced.Instance?.Configuration;
-                if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+                var configuredInstances = GetConfiguredJellyseerrInstances(config);
+                if (configuredInstances.Count == 0)
                 {
-                    return null;
+                    return items;
                 }
 
-                var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
-
-                foreach (var url in urls)
+                foreach (var instance in configuredInstances)
                 {
-                    var trimmedUrl = url.Trim();
                     try
                     {
-                        var requestUri = $"{trimmedUrl.TrimEnd('/')}/api/v1/request?take=500&skip=0&sort=added";
-                        httpClient.DefaultRequestHeaders.Remove("X-Api-User");
-                        httpClient.DefaultRequestHeaders.Add("X-Api-User", userId);
+                        var jellyseerrUser = await GetJellyseerrUser(jellyfinUserId, instance.Id);
+                        if (jellyseerrUser == null)
+                        {
+                            continue;
+                        }
+
+                        var jellyseerrUserId = jellyseerrUser.Id.ToString();
+                        var httpClient = _httpClientFactory.CreateClient();
+                        httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                        httpClient.DefaultRequestHeaders.Add("X-Api-User", jellyseerrUserId);
+                        var requestUri = $"{instance.Url}/api/v1/request?take=500&skip=0&sort=added";
 
                         var response = await httpClient.GetAsync(requestUri);
                         if (!response.IsSuccessStatusCode)
@@ -1193,11 +1150,9 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                             continue;
                         }
 
-                        var items = new List<WatchlistItem>();
-
                         foreach (var item in results.EnumerateArray())
                         {
-                            if (!BelongsToUser(item, userId))
+                            if (!BelongsToUser(item, jellyseerrUserId))
                             {
                                 continue;
                             }
@@ -1205,15 +1160,19 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                             var parsed = ParseRequestItem(item);
                             if (parsed != null)
                             {
+                                var key = $"{parsed.MediaType}:{parsed.TmdbId}";
+                                if (!dedupe.Add(key))
+                                {
+                                    continue;
+                                }
+
                                 items.Add(parsed);
                             }
                         }
-
-                        return items;
                     }
                     catch (Exception ex)
                     {
-                        _logger.Warning($"Failed to get requests from {trimmedUrl}: {ex.Message}");
+                        _logger.Warning($"Failed to get requests from {instance.Url}: {ex.Message}");
                         continue;
                     }
                 }
@@ -1223,7 +1182,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 _logger.Error($"Error getting Jellyseerr requests: {ex}");
             }
 
-            return null;
+            return items;
         }
 
         private bool BelongsToUser(JsonElement requestElement, string jellyseerrUserId)
@@ -1477,8 +1436,6 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 return StatusCode(503);
             }
 
-            JellyfinEnhanced.Instance?.SyncCustomTabsConfiguration();
-
             return new JsonResult(new
             {
                 // Jellyfin Enhanced Settings
@@ -1612,6 +1569,19 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 config.HiddenContentUseCustomTabs,
 
             });
+        }
+
+        [HttpPost("custom-tabs/sync")]
+        [Authorize]
+        public IActionResult SyncCustomTabsConfiguration()
+        {
+            if (!IsAdminUser())
+            {
+                return Forbid();
+            }
+
+            JellyfinEnhanced.Instance?.SyncCustomTabsConfiguration();
+            return Ok(new { success = true });
         }
 
         [HttpGet("tmdb/{**apiPath}")]

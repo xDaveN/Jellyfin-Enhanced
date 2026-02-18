@@ -2292,6 +2292,15 @@
             try {
                 const config = await buildConfigFromForm();
                 const result = await ApiClient.updatePluginConfiguration(pluginId, config);
+                try {
+                    await ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('/JellyfinEnhanced/custom-tabs/sync'),
+                        dataType: 'json'
+                    });
+                } catch (syncError) {
+                    console.warn('Failed to sync Custom Tabs configuration:', syncError);
+                }
                 Dashboard.processPluginConfigurationUpdateResult(result);
             } catch {
                 Dashboard.hideLoadingMsg();
@@ -2307,6 +2316,15 @@
                     // First, save the current configuration
                     const config = await buildConfigFromForm();
                     await ApiClient.updatePluginConfiguration(pluginId, config);
+                    try {
+                        await ApiClient.ajax({
+                            type: 'POST',
+                            url: ApiClient.getUrl('/JellyfinEnhanced/custom-tabs/sync'),
+                            dataType: 'json'
+                        });
+                    } catch (syncError) {
+                        console.warn('Failed to sync Custom Tabs configuration:', syncError);
+                    }
 
                     // Then reset all user settings to match the saved config
                     await ApiClient.ajax({
