@@ -1342,7 +1342,11 @@
     const avatar = issue?.createdBy?.avatar;
     if (!avatar) return "";
     if (avatar.startsWith("/")) {
-      return ApiClient.getUrl("/JellyfinEnhanced/proxy/avatar", { path: avatar });
+      const query = { path: avatar };
+      if (state.activeSeerrInstanceId) {
+        query.instanceId = state.activeSeerrInstanceId;
+      }
+      return ApiClient.getUrl("/JellyfinEnhanced/proxy/avatar", query);
     }
     return avatar;
   }
@@ -1857,7 +1861,14 @@
         const mediaType = viewIssueBtn.getAttribute('data-issue-media-type');
         const title = viewIssueBtn.getAttribute('data-issue-title') || '';
         if (tmdbId && mediaType && JE.jellyseerrIssueReporter?.showReportModal) {
-          JE.jellyseerrIssueReporter.showReportModal(tmdbId, title, mediaType, null, null);
+          JE.jellyseerrIssueReporter.showReportModal(
+            tmdbId,
+            title,
+            mediaType,
+            null,
+            null,
+            { instanceId: state.activeSeerrInstanceId || undefined },
+          );
         }
         return;
       }

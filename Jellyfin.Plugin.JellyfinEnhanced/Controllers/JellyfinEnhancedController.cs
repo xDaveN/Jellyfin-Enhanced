@@ -168,6 +168,21 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
         private async Task<string?> GetJellyseerrUserId(string jellyfinUserId, string? instanceId = null)
             => (await GetJellyseerrUser(jellyfinUserId, instanceId))?.Id.ToString();
 
+        private async Task<bool> IsJellyseerrInstanceActive(JellyseerrInstanceTarget instance)
+        {
+            try
+            {
+                var httpClient = _httpClientFactory.CreateClient();
+                httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                var response = await httpClient.GetAsync($"{instance.Url}/api/v1/status");
+                return response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         [Authorize]
         private async Task<IActionResult> ProxyJellyseerrRequest(string apiPath, HttpMethod method, string? content = null)
         {
@@ -338,7 +353,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
 
         [HttpGet("jellyseerr/instances")]
         [Authorize]
-        public IActionResult GetJellyseerrInstances()
+        public async Task<IActionResult> GetJellyseerrInstances()
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
             if (config == null || !config.JellyseerrEnabled)
@@ -353,10 +368,64 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                 name = i.Name
             }).ToArray();
 
+            var defaultInstanceId = payload.FirstOrDefault()?.id ?? string.Empty;
+            var instanceStates = await Task.WhenAll(instances.Select(async i => new
+            {
+                Instance = i,
+                IsActive = await IsJellyseerrInstanceActive(i)
+            }));
+
+            var jellyfinUserId = UserHelper.GetCurrentUserId(User)?.ToString();
+            if (!string.IsNullOrWhiteSpace(jellyfinUserId))
+            {
+                var linkedInstanceIds = new List<string>();
+                foreach (var instance in instances)
+                {
+                    var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId, instance.Id);
+                    if (!string.IsNullOrWhiteSpace(jellyseerrUserId))
+                    {
+                        linkedInstanceIds.Add(instance.Id);
+                    }
+                }
+
+                var linkedAndActive = instanceStates.FirstOrDefault(s =>
+                    s.IsActive && linkedInstanceIds.Contains(s.Instance.Id, StringComparer.OrdinalIgnoreCase));
+                if (linkedAndActive != null)
+                {
+                    defaultInstanceId = linkedAndActive.Instance.Id;
+                }
+                else
+                {
+                    var linked = instances.FirstOrDefault(i => linkedInstanceIds.Contains(i.Id, StringComparer.OrdinalIgnoreCase));
+                    if (linked != null)
+                    {
+                        defaultInstanceId = linked.Id;
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(defaultInstanceId))
+            {
+                var activeFallback = instanceStates.FirstOrDefault(s => s.IsActive);
+                defaultInstanceId = activeFallback?.Instance.Id ?? string.Empty;
+            }
+            else
+            {
+                var selected = instanceStates.FirstOrDefault(s => string.Equals(s.Instance.Id, defaultInstanceId, StringComparison.OrdinalIgnoreCase));
+                if (selected != null && !selected.IsActive)
+                {
+                    var activeFallback = instanceStates.FirstOrDefault(s => s.IsActive);
+                    if (activeFallback != null)
+                    {
+                        defaultInstanceId = activeFallback.Instance.Id;
+                    }
+                }
+            }
+
             return Ok(new
             {
                 instances = payload,
-                defaultInstanceId = payload.FirstOrDefault()?.id ?? string.Empty
+                defaultInstanceId
             });
         }
 

@@ -88,7 +88,11 @@
      * @param {string} mediaType - 'movie' or 'tv'
      * @param {string} backdropUrl - Optional backdrop image URL (full URL from Jellyfin or TMDB)
      */
-    issueReporter.showReportModal = function (tmdbId, itemName, mediaType, backdropUrl = null, item = null) {
+    issueReporter.showReportModal = function (tmdbId, itemName, mediaType, backdropUrl = null, item = null, options = {}) {
+        const instanceId = typeof options.instanceId === 'string' && options.instanceId.trim()
+            ? options.instanceId.trim()
+            : null;
+
         // Create the form HTML
         const ISSUE_TYPES = getIssueTypes();
         const formHtml = `
@@ -177,7 +181,15 @@
                     button.textContent = JE.t('jellyseerr_report_issue_submitting');
 
                     // Pass only the contents of the description box to the API
-                    const result = await JE.jellyseerrAPI.reportIssue(tmdbId, mediaType, issueType, message, problemSeason, problemEpisode);
+                    const result = await JE.jellyseerrAPI.reportIssue(
+                        tmdbId,
+                        mediaType,
+                        issueType,
+                        message,
+                        problemSeason,
+                        problemEpisode,
+                        { instanceId },
+                    );
 
                     if (result) {
                         JE.toast(JE.t('jellyseerr_report_issue_success'), 3000);
@@ -237,7 +249,11 @@
 
             try {
                 if (loadingEl) loadingEl.textContent = JE.t('jellyseerr_loading_issues');
-                const res = await JE.jellyseerrAPI.fetchIssuesForMedia(tmdbId, mediaType, { take: 50, filter: 'all' });
+                const res = await JE.jellyseerrAPI.fetchIssuesForMedia(tmdbId, mediaType, {
+                    take: 50,
+                    filter: 'all',
+                    instanceId,
+                });
                 let issues = res?.results || [];
 
                 if (!issues.length) {
@@ -247,7 +263,7 @@
 
                 const enriched = await Promise.all(issues.map(async (issue) => {
                     try {
-                        const full = await JE.jellyseerrAPI.fetchIssueById(issue.id);
+                        const full = await JE.jellyseerrAPI.fetchIssueById(issue.id, { instanceId });
                         return full || issue;
                     } catch (_) { return issue; }
                 }));

@@ -11,6 +11,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Querying;
 using Jellyfin.Plugin.JellyfinEnhanced.Configuration;
+using Jellyfin.Plugin.JellyfinEnhanced.Helpers.Jellyseerr;
 
 namespace Jellyfin.Plugin.JellyfinEnhanced.Services
 {
@@ -200,22 +201,20 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
         private async Task<MovieInfo?> GetNextMovieInCollectionAsync(int collectionId, string currentTmdbId)
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            var configuredInstances = JellyseerrInstanceHelper.GetConfiguredInstances(config);
+            if (config == null || configuredInstances.Count == 0)
             {
                 return null;
             }
 
             try
             {
-                var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                var httpClient = _httpClientFactory.CreateClient();
-                httpClient.DefaultRequestHeaders.Clear();
-                httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
-
-                foreach (var url in urls)
+                foreach (var instance in configuredInstances)
                 {
-                    var trimmedUrl = url.Trim().TrimEnd('/');
-                    var requestUrl = $"{trimmedUrl}/api/v1/collection/{collectionId}";
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Clear();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                    var requestUrl = $"{instance.Url}/api/v1/collection/{collectionId}";
 
                     try
                     {
@@ -303,7 +302,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
                     }
                     catch (Exception ex)
                     {
-                        _logger.Debug($"[Auto-Movie-Request] Error checking Jellyseerr at {trimmedUrl}: {ex.Message}");
+                        _logger.Debug($"[Auto-Movie-Request] Error checking Jellyseerr at {instance.Url}: {ex.Message}");
                         continue;
                     }
                 }
@@ -330,30 +329,27 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
         private async Task<bool> RequestMovie(string tmdbId, string jellyfinUserId)
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            var configuredInstances = JellyseerrInstanceHelper.GetConfiguredInstances(config);
+            if (config == null || configuredInstances.Count == 0)
             {
                 _logger.Warning("[Auto-Movie-Request] Jellyseerr configuration is missing");
                 return false;
             }
 
-            // Get Jellyseerr user ID
-            var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId);
-            if (string.IsNullOrEmpty(jellyseerrUserId))
-            {
-                _logger.Warning($"[Auto-Movie-Request] Could not find Jellyseerr user for Jellyfin user {jellyfinUserId}");
-                return false;
-            }
-
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
-            httpClient.DefaultRequestHeaders.Add("X-Api-User", jellyseerrUserId);
-
-            foreach (var url in urls)
+            foreach (var instance in configuredInstances)
             {
                 try
                 {
-                    var requestUri = $"{url.Trim().TrimEnd('/')}/api/v1/request";
+                    var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId, instance);
+                    if (string.IsNullOrEmpty(jellyseerrUserId))
+                    {
+                        continue;
+                    }
+
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", instance.ApiKey);
+                    httpClient.DefaultRequestHeaders.Add("X-Api-User", jellyseerrUserId);
+                    var requestUri = $"{instance.Url}/api/v1/request";
 
                     var requestBody = new
                     {
@@ -378,18 +374,20 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error($"[Auto-Movie-Request] Exception requesting movie from Jellyseerr at {url}: {ex.Message}");
+                    _logger.Error($"[Auto-Movie-Request] Exception requesting movie from Jellyseerr at {instance.Url}: {ex.Message}");
                 }
             }
 
+            _logger.Warning($"[Auto-Movie-Request] Could not find a linked Jellyseerr user or request failed for Jellyfin user {jellyfinUserId}");
             return false;
         }
 
         // Gets the Jellyseerr user ID for a Jellyfin user
-        private async Task<string?> GetJellyseerrUserId(string jellyfinUserId)
+        private async Task<string?> GetJellyseerrUserId(string jellyfinUserId, JellyseerrInstanceTarget? instance = null)
         {
             var config = JellyfinEnhanced.Instance?.Configuration;
-            if (config == null || string.IsNullOrEmpty(config.JellyseerrUrls) || string.IsNullOrEmpty(config.JellyseerrApiKey))
+            var configuredInstances = JellyseerrInstanceHelper.GetConfiguredInstances(config);
+            if (config == null || configuredInstances.Count == 0)
             {
                 return null;
             }
@@ -397,15 +395,19 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
             // Normalize the Jellyfin user ID (remove dashes for comparison)
             var normalizedJellyfinUserId = jellyfinUserId.Replace("-", "").ToLowerInvariant();
 
-            var urls = config.JellyseerrUrls.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            var httpClient = _httpClientFactory.CreateClient();
-            httpClient.DefaultRequestHeaders.Add("X-Api-Key", config.JellyseerrApiKey);
+            IEnumerable<JellyseerrInstanceTarget> instancesToCheck = configuredInstances;
+            if (instance != null)
+            {
+                instancesToCheck = new[] { instance };
+            }
 
-            foreach (var url in urls)
+            foreach (var configuredInstance in instancesToCheck)
             {
                 try
                 {
-                    var requestUri = $"{url.Trim().TrimEnd('/')}/api/v1/user?take=1000";
+                    var httpClient = _httpClientFactory.CreateClient();
+                    httpClient.DefaultRequestHeaders.Add("X-Api-Key", configuredInstance.ApiKey);
+                    var requestUri = $"{configuredInstance.Url}/api/v1/user?take=1000";
                     var response = await httpClient.GetAsync(requestUri);
 
                     if (response.IsSuccessStatusCode)
@@ -443,7 +445,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.Error($"[Auto-Movie-Request] Exception while trying to get Jellyseerr user ID from {url}: {ex.Message}");
+                    _logger.Error($"[Auto-Movie-Request] Exception while trying to get Jellyseerr user ID from {configuredInstance.Url}: {ex.Message}");
                 }
             }
 

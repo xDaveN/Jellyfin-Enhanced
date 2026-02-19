@@ -76,9 +76,20 @@
      * @param {object} [options] - Optional settings (signal, skipCache, skipRetry).
      * @returns {Promise<any>} - The JSON response from the server.
      */
+    function appendInstanceIdToPath(path, instanceId) {
+        const normalized = typeof instanceId === 'string' ? instanceId.trim() : '';
+        if (!normalized) {
+            return path;
+        }
+
+        const separator = path.includes('?') ? '&' : '?';
+        return `${path}${separator}instanceId=${encodeURIComponent(normalized)}`;
+    }
+
     async function get(path, options = {}) {
-        const url = ApiClient.getUrl(`/JellyfinEnhanced/jellyseerr${path}`);
-        const cacheKey = options.skipCache ? null : `jellyseerr:${path}`;
+        const jellyseerrPath = appendInstanceIdToPath(path, options.instanceId);
+        const url = ApiClient.getUrl(`/JellyfinEnhanced/jellyseerr${jellyseerrPath}`);
+        const cacheKey = options.skipCache ? null : `jellyseerr:${jellyseerrPath}`;
         return managedFetch(url, { ...options, cacheKey });
     }
 
@@ -88,10 +99,11 @@
      * @param {object} body - The JSON body to send with the request.
      * @returns {Promise<any>} - The server's response.
      */
-    async function post(path, body) {
+    async function post(path, body, options = {}) {
+        const jellyseerrPath = appendInstanceIdToPath(path, options.instanceId);
         return ApiClient.ajax({
             type: 'POST',
-            url: ApiClient.getUrl(`/JellyfinEnhanced/jellyseerr${path}`),
+            url: ApiClient.getUrl(`/JellyfinEnhanced/jellyseerr${jellyseerrPath}`),
             data: JSON.stringify(body),
             contentType: 'application/json',
             headers: { 'X-Jellyfin-User-Id': ApiClient.getCurrentUserId() }
@@ -461,7 +473,7 @@
      * @returns {Promise<{pageInfo?: object, results: Array}>}
      */
     api.fetchIssuesForMedia = async function(tmdbId, mediaType, options = {}) {
-        const { take = 20, skip = 0, filter = 'open', sort = 'added' } = options;
+        const { take = 20, skip = 0, filter = 'open', sort = 'added', instanceId } = options;
         try {
             const query = new URLSearchParams({
                 take: String(take),
@@ -470,7 +482,7 @@
                 sort
             });
 
-            const res = await get(`/issue?${query.toString()}`);
+            const res = await get(`/issue?${query.toString()}`, { instanceId });
             const issues = res && Array.isArray(res.results) ? res.results : [];
 
             const filtered = issues.filter(issue => {
@@ -492,9 +504,9 @@
      * @param {number} issueId
      * @returns {Promise<object|null>}
      */
-    api.fetchIssueById = async function(issueId) {
+    api.fetchIssueById = async function(issueId, options = {}) {
         try {
-            const res = await get(`/issue/${issueId}`);
+            const res = await get(`/issue/${issueId}`, { instanceId: options.instanceId });
             return res || null;
         } catch (error) {
             console.warn(`${logPrefix} Failed to fetch issue ${issueId}:`, error);
@@ -597,7 +609,7 @@
     // to be provided by the UI. Keep logic in `api.reportIssue` that
     // parses the numeric value and forwards it to Jellyseerr.
 
-    api.reportIssue = async function(mediaId, mediaType, problemType, message = '', problemSeason = 0, problemEpisode = 0) {
+    api.reportIssue = async function(mediaId, mediaType, problemType, message = '', problemSeason = 0, problemEpisode = 0, options = {}) {
         try {
             // problemType is now a numeric issue type (1, 2, 3, or 4) from the form
             const issueType = parseInt(problemType) || 4;
@@ -606,9 +618,9 @@
 
             let apiResult = null;
             if (mediaType === 'movie') {
-                apiResult = await get(`/movie/${mediaId}`);
+                apiResult = await get(`/movie/${mediaId}`, { instanceId: options.instanceId });
             } else if (mediaType === 'tv') {
-                apiResult = await get(`/tv/${mediaId}`);
+                apiResult = await get(`/tv/${mediaId}`, { instanceId: options.instanceId });
             }
 
             const internalId = apiResult && apiResult.mediaInfo && apiResult.mediaInfo.id;
@@ -626,7 +638,7 @@
             };
 
             console.debug(`${logPrefix} Sending issue report with body:`, body);
-            const result = await post('/issue', body);
+            const result = await post('/issue', body, { instanceId: options.instanceId });
             console.debug(`${logPrefix} Issue reported for Jellyseerr media ID ${internalId} (TMDB ${mediaId}, ${mediaType}): ${problemType}`);
             return result;
         } catch (error) {
