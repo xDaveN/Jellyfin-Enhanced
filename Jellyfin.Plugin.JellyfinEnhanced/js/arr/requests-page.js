@@ -18,6 +18,7 @@
     requestsFilter: "all",
     seerrInstances: [],
     activeSeerrInstanceId: null,
+    forcedSeerrInstanceId: null,
     issues: [],
     issuesPage: 1,
     issuesTotalPages: 1,
@@ -660,6 +661,7 @@
     if (!JE.pluginConfig?.JellyseerrEnabled) {
       state.seerrInstances = [];
       state.activeSeerrInstanceId = null;
+      state.forcedSeerrInstanceId = null;
       return null;
     }
 
@@ -676,10 +678,16 @@
         : [];
       state.seerrInstances = instances;
 
-      const hasActive = !!state.activeSeerrInstanceId
-        && instances.some((item) => item.id === state.activeSeerrInstanceId);
-      if (!hasActive) {
-        state.activeSeerrInstanceId = data?.defaultInstanceId || instances[0]?.id || null;
+      // In custom-tab mode with an explicit instance binding, never silently
+      // switch to another instance even if this user is not linked there.
+      if (state.forcedSeerrInstanceId) {
+        state.activeSeerrInstanceId = state.forcedSeerrInstanceId;
+      } else {
+        const hasActive = !!state.activeSeerrInstanceId
+          && instances.some((item) => item.id === state.activeSeerrInstanceId);
+        if (!hasActive) {
+          state.activeSeerrInstanceId = data?.defaultInstanceId || instances[0]?.id || null;
+        }
       }
 
       return instances;
@@ -695,7 +703,8 @@
    * Fetch requests from backend
    */
   async function fetchRequests() {
-    if (JE.pluginConfig?.JellyseerrEnabled && state.seerrInstances.length === 0) {
+    const hasForcedInstance = !!state.forcedSeerrInstanceId;
+    if (JE.pluginConfig?.JellyseerrEnabled && state.seerrInstances.length === 0 && !hasForcedInstance) {
       state.requests = [];
       state.requestsTotalPages = 1;
       return null;
@@ -808,7 +817,7 @@
       return null;
     }
 
-    if (state.seerrInstances.length === 0) {
+    if (state.seerrInstances.length === 0 && !state.forcedSeerrInstanceId) {
       state.issues = [];
       state.issuesTotalPages = 1;
       state.issuesError = false;
@@ -2389,11 +2398,19 @@
     const requestedInstanceId = typeof options.instanceId === "string"
       ? options.instanceId.trim()
       : "";
-    if (requestedInstanceId && state.activeSeerrInstanceId !== requestedInstanceId) {
+    if (requestedInstanceId) {
+      const instanceChanged = state.activeSeerrInstanceId !== requestedInstanceId;
+      const forceChanged = state.forcedSeerrInstanceId !== requestedInstanceId;
+      state.forcedSeerrInstanceId = requestedInstanceId;
       state.activeSeerrInstanceId = requestedInstanceId;
-      state.requestsPage = 1;
-      state.issuesPage = 1;
-      issueMediaCache.clear();
+
+      if (instanceChanged || forceChanged) {
+        state.requestsPage = 1;
+        state.issuesPage = 1;
+        issueMediaCache.clear();
+      }
+    } else {
+      state.forcedSeerrInstanceId = null;
     }
 
     injectStyles();
