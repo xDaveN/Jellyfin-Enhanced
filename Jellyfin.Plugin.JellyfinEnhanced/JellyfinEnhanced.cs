@@ -136,7 +136,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced
 
             tabs.Add(new ManagedCustomTab
             {
-                Title = instances.FirstOrDefault()?.Name ?? baseTitle,
+                Title = baseTitle,
                 ContentHtml = $"<div class=\"jellyfinenhanced requests\" {ManagedRequestsCustomTabMarker}{instanceAttr}></div>"
             });
 

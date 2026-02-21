@@ -362,13 +362,6 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             }
 
             var instances = GetConfiguredJellyseerrInstances(config);
-            var payload = instances.Select(i => new
-            {
-                id = i.Id,
-                name = i.Name
-            }).ToArray();
-
-            var defaultInstanceId = payload.FirstOrDefault()?.id ?? string.Empty;
             var instanceStates = await Task.WhenAll(instances.Select(async i => new
             {
                 Instance = i,
@@ -376,9 +369,9 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
             }));
 
             var jellyfinUserId = UserHelper.GetCurrentUserId(User)?.ToString();
+            var linkedInstanceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (!string.IsNullOrWhiteSpace(jellyfinUserId))
             {
-                var linkedInstanceIds = new List<string>();
                 foreach (var instance in instances)
                 {
                     var jellyseerrUserId = await GetJellyseerrUserId(jellyfinUserId, instance.Id);
@@ -388,38 +381,42 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.Controllers
                     }
                 }
 
-                var linkedAndActive = instanceStates.FirstOrDefault(s =>
-                    s.IsActive && linkedInstanceIds.Contains(s.Instance.Id, StringComparer.OrdinalIgnoreCase));
-                if (linkedAndActive != null)
-                {
-                    defaultInstanceId = linkedAndActive.Instance.Id;
-                }
-                else
-                {
-                    var linked = instances.FirstOrDefault(i => linkedInstanceIds.Contains(i.Id, StringComparer.OrdinalIgnoreCase));
-                    if (linked != null)
-                    {
-                        defaultInstanceId = linked.Id;
-                    }
-                }
             }
 
-            if (string.IsNullOrWhiteSpace(defaultInstanceId))
+            var visibleInstances = instances;
+            if (!string.IsNullOrWhiteSpace(jellyfinUserId))
             {
-                var activeFallback = instanceStates.FirstOrDefault(s => s.IsActive);
-                defaultInstanceId = activeFallback?.Instance.Id ?? string.Empty;
+                visibleInstances = linkedInstanceIds.Count > 0
+                    ? instances.Where(i => linkedInstanceIds.Contains(i.Id)).ToList()
+                    : new List<JellyseerrInstanceTarget>();
             }
-            else
+
+            var payload = visibleInstances.Select(i => new
             {
-                var selected = instanceStates.FirstOrDefault(s => string.Equals(s.Instance.Id, defaultInstanceId, StringComparison.OrdinalIgnoreCase));
-                if (selected != null && !selected.IsActive)
+                id = i.Id,
+                name = i.Name
+            }).ToArray();
+
+            var defaultInstanceId = payload.FirstOrDefault()?.id ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(defaultInstanceId))
+            {
+                var selected = instanceStates.FirstOrDefault(s =>
+                    s.IsActive && string.Equals(s.Instance.Id, defaultInstanceId, StringComparison.OrdinalIgnoreCase));
+                if (selected == null)
                 {
-                    var activeFallback = instanceStates.FirstOrDefault(s => s.IsActive);
+                    var activeFallback = instanceStates.FirstOrDefault(s =>
+                        s.IsActive && payload.Any(p => string.Equals(p.id, s.Instance.Id, StringComparison.OrdinalIgnoreCase)));
                     if (activeFallback != null)
                     {
                         defaultInstanceId = activeFallback.Instance.Id;
                     }
                 }
+            }
+            else
+            {
+                var activeFallback = instanceStates.FirstOrDefault(s =>
+                    s.IsActive && payload.Any(p => string.Equals(p.id, s.Instance.Id, StringComparison.OrdinalIgnoreCase)));
+                defaultInstanceId = activeFallback?.Instance.Id ?? string.Empty;
             }
 
             return Ok(new

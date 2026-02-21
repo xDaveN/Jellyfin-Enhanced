@@ -146,6 +146,7 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.ScheduledTasks
                         {
                             _logger.Info($"[Jellyseerr Watchlist Sync] No watchlist/request items found for user: {jellyfinUser.Username}");
                         }
+
                         continue;
                     }
 
@@ -226,10 +227,12 @@ namespace Jellyfin.Plugin.JellyfinEnhanced.ScheduledTasks
                 {
                     _logger.Error($"[Jellyseerr Watchlist Sync] Error processing user {jellyfinUser.Username}: {ex.Message}");
                 }
-
-                processedUsers++;
-                var currentProgress = (int)((double)processedUsers / totalUsers * 100);
-                progress?.Report(currentProgress);
+                finally
+                {
+                    processedUsers++;
+                    var currentProgress = (int)((double)processedUsers / totalUsers * 100);
+                    progress?.Report(currentProgress);
+                }
             }
 
             _logger.Info($"=================================================================================================================================");
