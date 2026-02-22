@@ -35,6 +35,7 @@
   let pendingTabAt = 0;
   const managedTabInfo = {
     loaded: false,
+    loading: false,
     indices: new Set(),
     buttonIds: new Set(),
     instanceByIndex: new Map()
@@ -87,11 +88,11 @@
   }
 
   async function loadManagedTabMetadata() {
-    if (managedTabInfo.loaded) {
+    if (managedTabInfo.loaded || managedTabInfo.loading) {
       return;
     }
 
-    managedTabInfo.loaded = true;
+    managedTabInfo.loading = true;
 
     try {
       const requestUrl = (typeof ApiClient !== 'undefined' && typeof ApiClient.getUrl === 'function')
@@ -125,6 +126,9 @@
       });
     } catch (_) {
       // Ignore; fallbacks below still apply.
+    } finally {
+      managedTabInfo.loading = false;
+      managedTabInfo.loaded = true;
     }
   }
 
@@ -244,7 +248,18 @@
     }
 
     const applySelection = () => {
-      const currentButton = findPendingManagedButton() || button;
+      const domActiveButton = getDomActiveTabButton();
+      if (domActiveButton && !isLikelyManagedRequestsButton(domActiveButton)) {
+        clearPendingTab();
+        return;
+      }
+
+      const currentButton = findPendingManagedButton()
+        || (isLikelyManagedRequestsButton(domActiveButton) ? domActiveButton : null);
+      if (!currentButton) {
+        return;
+      }
+
       const currentIndex = getActiveTabIndex(currentButton);
       if (currentIndex === null) {
         return;
@@ -264,14 +279,23 @@
     setTimeout(applySelection, 320);
   }
 
-  function getActiveTabButton() {
-    const active = document.querySelector('.tabs-viewmenubar .emby-tab-button-active')
+  function getDomActiveTabButton() {
+    return document.querySelector('.tabs-viewmenubar .emby-tab-button-active')
       || document.querySelector('.emby-tabs-slider .emby-tab-button-active');
+  }
+
+  function getActiveTabButton() {
+    const active = getDomActiveTabButton();
     if (isLikelyManagedRequestsButton(active)) {
       return active;
     }
 
-    return findPendingManagedButton() || active;
+    if (!active) {
+      return findPendingManagedButton();
+    }
+
+    clearPendingTab();
+    return null;
   }
 
   function getActiveTabIndex(button) {
@@ -289,17 +313,21 @@
       return false;
     }
 
-    const id = button.id || '';
-    const index = getActiveTabIndex(button);
-    if (id && managedTabInfo.buttonIds.has(id)) {
-      return true;
-    }
-    if (index !== null && managedTabInfo.indices.has(index)) {
-      return true;
+    if (!managedTabInfo.loaded) {
+      return false;
     }
 
-    if (id.startsWith('customTabButton_')) {
-      return true;
+    const id = button.id || '';
+    const index = getActiveTabIndex(button);
+    const hasManagedMetadata = managedTabInfo.buttonIds.size > 0 || managedTabInfo.indices.size > 0;
+    if (hasManagedMetadata) {
+      if (id && managedTabInfo.buttonIds.has(id)) {
+        return true;
+      }
+      if (index !== null && managedTabInfo.indices.has(index)) {
+        return true;
+      }
+      return false;
     }
 
     const text = normalizeLabel(
@@ -352,6 +380,10 @@
 
   function ensureRequestsContainerForActiveTab() {
     const activeButton = getActiveTabButton();
+    if (!isLikelyManagedRequestsButton(activeButton)) {
+      return null;
+    }
+
     const activeTabIndex = getActiveTabIndex(activeButton);
     if (activeTabIndex === null) {
       return null;
@@ -385,58 +417,14 @@
     return requestsContainer;
   }
 
-  function isContainerVisible(container) {
-    if (!container || !document.contains(container)) {
-      return false;
-    }
-
-    if (container.classList.contains('hide')) {
-      return false;
-    }
-
-    const style = window.getComputedStyle(container);
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      return false;
-    }
-
-    const rect = container.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-
   function getActiveContainer() {
     const fromActiveTab = ensureRequestsContainerForActiveTab();
     if (fromActiveTab) {
       return fromActiveTab;
     }
 
-    const candidates = Array.from(document.querySelectorAll('.jellyfinenhanced.requests'));
-    if (!candidates.length) {
-      return null;
-    }
-
     // Preferred: explicit active-tab marker
-    const explicit = document.querySelector('.tabContent.is-active .jellyfinenhanced.requests');
-    if (explicit) {
-      return explicit;
-    }
-
-    // Fallback: whichever requests container is visible
-    const visible = candidates.find(isContainerVisible);
-    if (visible) {
-      return visible;
-    }
-
-    // If only one exists, use it.
-    if (candidates.length === 1) {
-      return candidates[0];
-    }
-
-    // Preserve current active container if still in DOM.
-    if (activeContainer && document.contains(activeContainer)) {
-      return activeContainer;
-    }
-
-    return null;
+    return document.querySelector('.tabContent.is-active .jellyfinenhanced.requests[data-je-managed="requests-seerr"]');
   }
 
   // Render downloads in the currently active custom tab container
@@ -513,10 +501,17 @@
     window.addEventListener('hashchange', () => queueRenderBurst(JE), true);
     document.addEventListener('click', (event) => {
       const button = event.target?.closest?.('.emby-tabs-slider .emby-tab-button');
-      if (button && isLikelyManagedRequestsButton(button)) {
-        stabilizeManagedTabSelection(button);
+      if (button) {
+        if (isLikelyManagedRequestsButton(button)) {
+          stabilizeManagedTabSelection(button);
+          queueRenderBurst(JE);
+        } else {
+          clearPendingTab();
+          queueRender(JE);
+        }
+        return;
       }
-      queueRenderBurst(JE);
+      queueRender(JE);
     }, true);
   }
 

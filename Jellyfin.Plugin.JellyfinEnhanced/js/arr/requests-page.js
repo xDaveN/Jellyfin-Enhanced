@@ -2042,6 +2042,20 @@
   /**
    * Start polling for updates
    */
+  function isCustomTabVisible() {
+    if (!JE.pluginConfig?.DownloadsUseCustomTabs) {
+      return !!state._customTabMode;
+    }
+
+    // Prefer managed marker, but keep legacy fallback for older tab markup.
+    return !!document.querySelector('.tabContent.is-active .jellyfinenhanced.requests[data-je-managed="requests-seerr"]')
+      || !!document.querySelector('.tabContent.is-active .jellyfinenhanced.requests');
+  }
+
+  function isPollingVisible() {
+    return state.pageVisible || state._pluginPageVisible || isCustomTabVisible();
+  }
+
   function startPolling() {
     stopPolling();
     const config = JE.pluginConfig || {};
@@ -2057,7 +2071,7 @@
 
 
     // Check visibility across all view modes: normal page, plugin pages, or custom tabs
-    const isVisible = state.pageVisible || state._pluginPageVisible || state._customTabMode;
+    const isVisible = isPollingVisible();
     if (!isVisible) {
       return;
     }
@@ -2065,7 +2079,7 @@
     const interval = intervalSeconds * 1000;
     state.pollTimer = setInterval(() => {
       // Re-check visibility on each interval
-      const currentlyVisible = state.pageVisible || state._pluginPageVisible || state._customTabMode;
+      const currentlyVisible = isPollingVisible();
       if (currentlyVisible && !state.isLoading) {
         loadAllData();
       }
